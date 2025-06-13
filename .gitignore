@@ -1,0 +1,39 @@
+# Visual Studio / C++
+*.sln
+*.suo
+*.vcxproj*
+*.user
+*.ncb
+*.sdf
+*.opensdf
+*.db
+
+# Build output
+[Bb]uild/
+[Dd]ebug/
+[Rr]elease/
+x64/
+Win32/
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.lib
+*.exp
+
+# .NET
+[Bb]in/
+[Oo]bj/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+
+# vcpkg
+vcpkg_installed/
+
+# User-specific
+.vs/

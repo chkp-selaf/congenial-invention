@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <!--
+    This is a template WiX installer configuration.
+    To build this, you need the WiX Toolset (http://wixtoolset.org/).
+    Command line build: `wix build -ext Wix4.Util.dll Product.wxs`
+    -->
+    <Product Id="*" Name="AI Traffic Interceptor" Language="1033" Version="1.0.0.0" Manufacturer="Your Company" UpgradeCode="{PUT-GUID-HERE}">
+        <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" />
+
+        <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+        <MediaTemplate EmbedCab="yes" />
+
+        <Feature Id="ProductFeature" Title="AI Traffic Interceptor" Level="1">
+            <ComponentGroupRef Id="ProductComponents" />
+        </Feature>
+    </Product>
+
+    <Fragment>
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="ProgramFiles64Folder">
+                <Directory Id="INSTALLFOLDER" Name="AI Traffic Interceptor">
+                    <!-- The files will be harvested from the build output directories -->
+                </Directory>
+            </Directory>
+        </Directory>
+    </Fragment>
+
+    <Fragment>
+        <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+            <!-- TODO: Point these paths to the actual build output -->
+            <Component Id="CollectorExe">
+                <File Source="..\build\collector\bin\Release\net8.0\ai_collector.exe" />
+            </Component>
+            <Component Id="InjectorExe">
+                <File Source="..\build\injector\Release\ai_injector.exe" />
+            </Component>
+            <Component Id="HookDll">
+                <File Source="..\build\dll\Release\ai_hook.dll" />
+            </Component>
+        </ComponentGroup>
+    </Fragment>
+</Wix>
