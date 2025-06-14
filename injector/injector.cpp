@@ -6,6 +6,7 @@
 #include <iostream>
 #include <filesystem> // For path manipulation (C++17)
 #include <algorithm>
+#include <unordered_set>
 
 // Simple helper to collect all child PIDs of a given parent process
 static std::vector<DWORD> CollectChildPids(DWORD parentPid) {
@@ -86,69 +87,71 @@ int wmain(int argc, wchar_t* argv[]) {
         }
     }
 
-    // Combine remaining arguments into single command line for CreateProcess
-    std::wstring app_cmdline;
-    for (int i = firstCmdArg; i < argc; ++i) {
-        if (i > firstCmdArg) app_cmdline += L" ";
-        app_cmdline += argv[i];
-    }
+    // The executable path is the first argument after options.
+    std::wstring executable_path = argv[firstCmdArg];
 
-    std::wstring final_cmdline = app_cmdline;
+    // Build the rest of the arguments string.
+    std::wstring arguments;
     if (withChildren) {
-        wchar_t rawInjectorPath[MAX_PATH];
-        if (GetModuleFileNameW(NULL, rawInjectorPath, MAX_PATH) == 0) {
-            std::wcerr << L"Failed to get injector path: " << GetLastError() << std::endl;
-            return 1; // Or handle error appropriately
-        }
+        // Find preload.js relative to the injector's location.
+        wchar_t raw_injector_path[MAX_PATH];
+        if (GetModuleFileNameW(NULL, raw_injector_path, MAX_PATH) > 0) {
+            std::filesystem::path preload_script_path = std::filesystem::path(raw_injector_path).parent_path() 
+                / L".." / L".." / L".." / L"renderer" / L"preload.js";
+            preload_script_path = std::filesystem::absolute(preload_script_path).lexically_normal();
 
-        std::filesystem::path injectorPath(rawInjectorPath);
-        // Assuming injector is at <project_root>/build/injector/Release/ai_injector.exe
-        // And preload.js is at <project_root>/renderer/preload.js
-        std::filesystem::path preloadScriptPath = injectorPath.parent_path() / L".." / L".." / L".." / L"renderer" / L"preload.js";
-        
-        preloadScriptPath = std::filesystem::absolute(preloadScriptPath);
-        preloadScriptPath = preloadScriptPath.lexically_normal();
-
-        if (!std::filesystem::exists(preloadScriptPath)){
-            std::wcerr << L"Preload script not found at: " << preloadScriptPath.wstring() << std::endl;
-            // Decide if this is a fatal error or just a warning
-        } else {
-            std::wstring preloadArg = L"--preload \"";
-            preloadArg += preloadScriptPath.wstring();
-            preloadArg += L"\" ";
-
-            final_cmdline.insert(0, preloadArg); // Prepend preload arg to the application's command line
+            if (std::filesystem::exists(preload_script_path)) {
+                arguments += L" --preload \"" + preload_script_path.wstring() + L"\"";
+            } else {
+                std::wcerr << L"Preload script not found at: " << preload_script_path.wstring() << std::endl;
+            }
         }
     }
 
+    // Append any original arguments that came after the executable path.
+    for (int i = firstCmdArg + 1; i < argc; ++i) {
+        arguments += L" ";
+        arguments += argv[i];
+    }
+
+    // For CreateProcess, the command line must start with the executable.
+    // We quote the executable path to handle spaces correctly.
+    std::wstring final_cmdline = L"\"" + executable_path + L"\"" + arguments;
+
+    std::wcerr << L"[Injector] Launching: " << final_cmdline << std::endl;
     // Launch main process and inject
     DWORD mainPid = 0;
     if (!StartProcessAndInject(final_cmdline, &mainPid)) return 1;
 
     if (!withChildren) return 0;
 
-    // Give the target some time to spawn renderer / extension host processes
-    Sleep(1500);
+    // Monitor for new child processes for ~30 seconds after launch
+    std::unordered_set<DWORD> injected{ mainPid };
+    constexpr int kWatchSeconds = 30;
+    constexpr int kPollIntervalMs = 1000;
 
-    // Recursively collect child processes of the launched target
-    std::vector<DWORD> queue{mainPid};
-    std::vector<DWORD> allChildren;
-    while (!queue.empty()) {
-        DWORD parent = queue.back();
-        queue.pop_back();
-        auto kids = CollectChildPids(parent);
-        for (DWORD kid : kids) {
-            if (std::find(allChildren.begin(), allChildren.end(), kid) == allChildren.end()) {
-                allChildren.push_back(kid);
-                queue.push_back(kid); // depth-first traversal to capture nested children
+    auto injectDescendants = [&](DWORD rootPid) {
+        std::vector<DWORD> queue{ rootPid };
+        while (!queue.empty()) {
+            DWORD parent = queue.back();
+            queue.pop_back();
+            auto kids = CollectChildPids(parent);
+            for (DWORD kid : kids) {
+                if (injected.insert(kid).second) { // newly discovered
+                    if (InjectIntoProcess(kid, kDllPath)) {
+                        std::wcout << L"Injected into child PID " << kid << std::endl;
+                    }
+                }
+                queue.push_back(kid);
             }
         }
-    }
+    };
 
-    for (DWORD pid : allChildren) {
-        if (InjectIntoProcess(pid, kDllPath)) {
-            std::wcout << L"Injected into child PID " << pid << std::endl;
-        }
+    int elapsed = 0;
+    while (elapsed < kWatchSeconds * 1000) {
+        injectDescendants(mainPid);
+        Sleep(kPollIntervalMs);
+        elapsed += kPollIntervalMs;
     }
     return 0;
 }

@@ -54,12 +54,22 @@ add_custom_target(build_collector ALL
     COMMENT "Building C# collector..."
 )
 
-# MSI packaging (WiX) – requires WiX v4 on PATH
-# find_program(WIX_EXECUTABLE wix REQUIRED)
-# add_custom_target(package_msi
-#     COMMAND ${WIX_EXECUTABLE} build -ext Wix4.Util.dll -o ${CMAKE_BINARY_DIR}/AIInterceptor.msi ${CMAKE_SOURCE_DIR}/packaging/Product.wxs
-#     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/packaging
-#     COMMENT "Building MSI package with WiX Toolset"
-# )
+find_program(WIX_EXECUTABLE wix REQUIRED)
 
-# add_dependencies(package_msi ai_injector ai_hook build_collector)
+# Add a pre-build step to ensure the necessary WiX extension is installed
+add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/wix_ext_util.stamp
+    COMMAND ${WIX_EXECUTABLE} extension add WixToolset.Util.wixext/6.0.1
+    COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_BINARY_DIR}/wix_ext_util.stamp
+    COMMENT "Ensuring WiX Util extension is available..."
+    VERBATIM
+)
+
+add_custom_target(package_msi
+    COMMAND ${WIX_EXECUTABLE} build -ext Wix.Util.dll -o ${CMAKE_BINARY_DIR}/AIInterceptor.msi ${CMAKE_SOURCE_DIR}/packaging/Product.wxs
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/packaging
+    COMMENT "Building MSI package with WiX Toolset"
+    DEPENDS ${CMAKE_BINARY_DIR}/wix_ext_util.stamp
+)
+
+add_dependencies(package_msi ai_injector ai_hook build_collector)

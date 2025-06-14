@@ -127,6 +127,87 @@ cmake --build build --target package_msi --config Release
 
 ---
 
+## 6. AI Agent Hand-Off Plan
+
+> **Purpose:** Provide incoming AI engineers (or automated agents) with a single, authoritative snapshot of the project's state, priorities, and gotchas. Update this section whenever handing the repo to a new owner.
+
+### 6.1 High-Level Overview
+
+*   Intercept outbound network traffic from Windows processes by injecting `ai_hook.dll` (Detours) and streaming structured JSON events to `ai_collector.exe` (named pipe).
+*   Package DLL, injector, and collector into a signed MSI for friction-free installation.
+
+### 6.2 Repository Snapshot (2025-06-14)
+
+* **Build status:** `ai_hook.dll`, `ai_injector.exe`, and .NET collector build **clean** in Release.
+* **Tests:** `tests/python/test_capture.py` passes – validates named-pipe handshake.
+* **Electron:** Injector can spawn VS Code with `--preload`; renderer injection _partially_ implemented.
+* **Packaging:** WiX target fails (`WIX0144` – `Wix.Util.dll` not found).
+
+### 6.3 Environment Prerequisites
+
+* Visual Studio 2022 (x64 workloads) – includes CMake.
+* WiX 6.0.1 installed via `dotnet tool install ‑-global wix` → `wix.exe` on `%PATH%`.
+* Python 3.12 for e2e script.
+* Detours submodule already cloned under `external/detours`.
+
+### 6.4 Build & Test Quickstart
+
+```powershell
+# Configure
+$vsCmake = "$Env:ProgramFiles\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+Remove-Item -Recurse -Force build
+& $vsCmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+
+# Build all artefacts
+& $vsCmake --build build --config Release
+
+# Smoke test
+build\collector\bin\Release\net8.0\ai_collector.exe      # terminal 1
+build\injector\Release\ai_injector.exe \
+    "C:\Python312\python.exe" tests\python\test_capture.py  # terminal 2
+```
+
+### 6.5 What's Done vs. Blocking
+
+| Category | ✅ Completed | ⏳ Blocking / TODO |
+|----------|-------------|-------------------|
+| Core hooks | WinHTTP, WebSocket, OpenSSL (`SSL_write`), Schannel | Add `SSL_read`; robust Electron renderer detour |
+| IPC | Named-pipe client (retry/back-off); collector supports 10 instances | Fail-safe pass-through on hook error |
+| Packaging | WiX template & custom CMake target | Fix `WIX0144`; sign MSI |
+| Tests | Python e2e verifies pipe traffic | GoogleTest for crypto hooks |
+
+### 6.6 Next Steps (Priority Order)
+
+1. **Packaging (Milestone M9)** – locate WiX extension path, patch `CMakeLists.txt`, build MSI, add shortcuts & service.
+2. **Electron/Node Descendant Injection (M3.5-M3.7)** – monitor child PIDs for 30 s post-launch and inject on-the-fly.
+3. **Add `SSL_read` Detour** – mirror pattern-scanner, emit response body.
+4. **Security/Hardening (M10)** – allow/deny-list, ETW logging, config JSON.
+
+### 6.7 Useful Commands
+
+```powershell
+# List WiX extensions with absolute paths
+wix extension list
+
+# Manual MSI build
+wix build packaging\Product.wxs -arch x64 -out build\ai-traffic-interceptor.msi \
+    -ext WixToolset.Util.wixext/6.0.1
+
+# Inject into running PID (debug)
+build\injector\Release\ai_injector.exe --pid 1234
+```
+
+### 6.8 Hand-Off Checklist
+
+- [ ] `git status` clean (commit or stash local edits).
+- [ ] Release build & Python e2e pass.
+- [ ] WiX MSI builds and installs/uninstalls without error.
+- [ ] Tag release (e.g. `v0.4.0-msi-alpha`).
+
+---
+
+> **Remember:** Keep this hand-off section concise but _current_. Future AI agents will look here first.
+
 ### Contacts & Conventions
 * Code style: modern C++17, `.clang-format` TBD.
 * Log format: JSON one-line records over named pipe `\\.\pipe\ai-hook`.
