@@ -14,7 +14,8 @@ void PipeInitialize() {
         return; // Already initialized
     }
 
-    while (true) {
+    // Try a few times with delays to avoid overwhelming the pipe server
+    for (int attempts = 0; attempts < 3; attempts++) {
         g_hPipe = CreateFileW(
             kPipeName,
             GENERIC_WRITE,
@@ -25,21 +26,30 @@ void PipeInitialize() {
             NULL);          // no template file
 
         if (g_hPipe != INVALID_HANDLE_VALUE) {
+            OutputDebugStringW(L"Pipe connected successfully.");
             break; // Success
         }
 
-        // Exit if an error other than "not found" occurs.
-        if (GetLastError() != ERROR_PIPE_BUSY) {
-            // Log error (can't use pipe logger here!)
-            OutputDebugStringW(L"Could not open pipe. GLE=");
-            return;
+        DWORD error = GetLastError();
+        if (error == ERROR_PIPE_BUSY) {
+            // Wait for the pipe to be available.
+            if (WaitNamedPipeW(kPipeName, 5000)) { // 5-second timeout
+                continue; // Try again
+            } else {
+                OutputDebugStringW(L"WaitNamedPipe timed out.");
+            }
+        } else if (error == ERROR_FILE_NOT_FOUND) {
+            OutputDebugStringW(L"Pipe not found. Collector may not be running.");
+        } else {
+            OutputDebugStringW(L"Could not open pipe. Unknown error.");
         }
 
-        // Wait for the pipe to be available.
-        if (!WaitNamedPipeW(kPipeName, 20000)) { // 20-second timeout
-            OutputDebugStringW(L"WaitNamedPipe timed out.");
-            return;
-        }
+        // Wait before retrying
+        Sleep(1000 * (attempts + 1)); // 1s, 2s, 3s delays
+    }
+
+    if (g_hPipe == INVALID_HANDLE_VALUE) {
+        OutputDebugStringW(L"Failed to connect to pipe after multiple attempts.");
     }
 }
 
@@ -54,7 +64,7 @@ void PipeShutdown() {
 void PipeSendEvent(const CapturedEvent& event) {
     std::lock_guard<std::mutex> lock(g_pipeMutex);
     if (g_hPipe == INVALID_HANDLE_VALUE) {
-        return;
+        return; // No pipe connection, silently drop the event
     }
 
     std::string json = event.ToJson();
@@ -69,8 +79,10 @@ void PipeSendEvent(const CapturedEvent& event) {
         NULL);
 
     if (!fSuccess) {
-        // Pipe may have been closed, try to reconnect
-        PipeShutdown();
-        PipeInitialize();
+        // Pipe may have been closed, close our handle but don't try to reconnect immediately
+        // to avoid loops. The next injection will trigger a new connection attempt.
+        OutputDebugStringW(L"Pipe write failed. Closing connection.");
+        CloseHandle(g_hPipe);
+        g_hPipe = INVALID_HANDLE_VALUE;
     }
 }

@@ -53,3 +53,13 @@ add_custom_target(build_collector ALL
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/collector
     COMMENT "Building C# collector..."
 )
+
+# MSI packaging (WiX) – requires WiX v4 on PATH
+# find_program(WIX_EXECUTABLE wix REQUIRED)
+# add_custom_target(package_msi
+#     COMMAND ${WIX_EXECUTABLE} build -ext Wix4.Util.dll -o ${CMAKE_BINARY_DIR}/AIInterceptor.msi ${CMAKE_SOURCE_DIR}/packaging/Product.wxs
+#     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/packaging
+#     COMMENT "Building MSI package with WiX Toolset"
+# )
+
+# add_dependencies(package_msi ai_injector ai_hook build_collector)

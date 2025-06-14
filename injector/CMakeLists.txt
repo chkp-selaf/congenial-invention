@@ -3,6 +3,7 @@ add_executable(ai_injector
 )
 
 target_include_directories(ai_injector PRIVATE ${CMAKE_SOURCE_DIR}/external/detours/include)
+target_include_directories(ai_injector PRIVATE ${CMAKE_SOURCE_DIR}/external/detours/src)
 
 target_link_libraries(ai_injector PRIVATE detours)
 

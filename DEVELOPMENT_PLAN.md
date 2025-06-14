@@ -1,6 +1,6 @@
 # AI Traffic Interceptor – Development Plan
 
-**Last updated:** 2025-06-13
+**Last updated:** 2025-06-14
 
 ---
 
@@ -13,7 +13,7 @@
 | M3 | WinHTTP / WebSocket hooks | ✅ Done |
 | M3.5–3.7 | Electron & Node discovery/injection | ⚠️ Pending |
 | M4 | OpenSSL/BoringSSL hooks (pattern-scan `SSL_write`) | ✅ Done |
-| M5 | Schannel hooks (`EncryptMessage` / `DecryptMessage`) | ✅ Done |
+| M5 | Schannel hooks (`EncryptMessage`, `DecryptMessage`, `AcquireCredentialsHandleW`) | ✅ Done | ALPN capture via AcquireCredentialsHandleW |
 | M6 | Named-pipe IPC & C# collector | ✅ Done |
 | M7 | Analysis PoC (PII & prompt-injection regex) | ✅ Done |
 | M8 | End-to-end test script (Python) | ✅ Done (Windows run pending) |
@@ -37,21 +37,50 @@
 
 ## 3. Build Instructions (Windows x64)
 
-1. **Prereqs**: Visual Studio 2022 C++, CMake ≥3.21, .NET 8 SDK, WiX 4.
-2. `git clone <repo>` → `git submodule update --init --recursive`
-3. Configure + build Release:
-   ```powershell
-   cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
-   cmake --build build --config Release
-   ```
-4. Optional Python test env:
-   ```powershell
-   cmake --build build --target setup_python_test --config Release
-   ```
-5. Package MSI:
-   ```powershell
-   wix build -o AIInterceptor.msi packaging\Product.wxs
-   ```
+> These steps assume **Visual Studio 2022** is installed.  CMake is bundled with VS so you don't need a separate installation.
+
+### 3.1 Configure (first time or after `git pull`)
+```powershell
+# Optional – start clean when switching Win32⇄x64 or after larger CMake edits
+Remove-Item -Recurse -Force build   # or just delete in Explorer
+
+# VS-bundled CMake path (kept on one line):
+& "${Env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" `
+    -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+```
+
+### 3.2 Full build
+```powershell
+# Builds every native target *and* the .NET collector
+& "${Env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" `
+    --build build --config Release
+```
+
+### 3.3 Incremental component build
+Sometimes it's faster to iterate on a single artefact:
+```powershell
+cmake --build build --target detours        --config Release  # static detours.lib
+cmake --build build --target ai_injector    --config Release  # injector EXE
+cmake --build build --target ai_hook        --config Release  # hook DLL
+cmake --build build --target build_collector --config Release # dotnet publish
+```
+
+### 3.4 Packaging (WiX)
+The WiX custom target is **commented-out** until WiX 4 is installed and on *PATH*.
+Un-comment the block at the bottom of the root `CMakeLists.txt` once WiX is available:
+```cmake
+find_program(WIX_EXECUTABLE wix REQUIRED)
+add_custom_target(package_msi …)
+```
+Then build:
+```powershell
+cmake --build build --target package_msi --config Release
+```
+
+### 3.5 Troubleshooting
+* "platform Win32 vs x64" → delete **build/** and re-configure.
+* Missing dependencies (googletest) → correct `GIT_TAG` in `tests/CMakeLists.txt` (now `v1.14.0`).
+* WiX not found → ensure WiX 4 installed or keep packaging target disabled.
 
 ---
 
@@ -80,8 +109,9 @@
    * Replace brittle byte-patterns with IDA-verified signatures or export-table fall-backs.
    * Add `SSL_read` hook to capture responses.
 3. **Packaging (M9)**
-   * Finish WiX template: author shortcuts, uninstall, optional Windows service for collector, environment variables.
-   * Sign binaries & MSI.
+    * Ensure Release build pipeline produces all artifacts (CMake C++ targets and `dotnet build` for collector).
+    * Finish WiX template: author shortcuts, uninstall flow, optional Windows service for collector, environment variables.
+    * Sign binaries & MSI.
 4. **Hardening (M10)**
    * Allow/deny-list of processes (config JSON file).
    * Fail-safe pass-through on hook errors.

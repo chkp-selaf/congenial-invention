@@ -2,16 +2,7 @@
 
 #include "json.h"
 
-enum class ApiType {
-    Unknown,
-    WinHttpSend,
-    WinHttpRead,
-    WebSocketSend,
-    WebSocketReceive,
-    SslWrite,
-    SchannelEncrypt,
-    SchannelDecrypt
-};
+// ApiType enum is defined in json.h
 
 void PipeInitialize();
 void PipeShutdown();

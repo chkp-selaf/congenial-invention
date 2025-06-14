@@ -13,7 +13,7 @@ while (true) // Loop to allow reconnects
 {
     try
     {
-        await using var server = new NamedPipeServerStream(pipeName, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        await using var server = new NamedPipeServerStream(pipeName, PipeDirection.In, 10, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
         await server.WaitForConnectionAsync();
 
         Console.WriteLine("Client connected.");
