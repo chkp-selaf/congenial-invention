@@ -12,12 +12,12 @@
 | M2 | Injector (`ai_injector.exe`) | ✅ Done |
 | M3 | WinHTTP / WebSocket hooks | ✅ Done |
 | M3.5–3.7 | Electron & Node discovery/injection | ⚠️ Pending |
-| M4 | OpenSSL/BoringSSL hooks (pattern-scan `SSL_write`) | ✅ Done |
+| M4 | OpenSSL/BoringSSL hooks (pattern-scan `SSL_write`) | ✅ Done | Bidirectional capture with `SSL_read` now complete |
 | M5 | Schannel hooks (`EncryptMessage`, `DecryptMessage`, `AcquireCredentialsHandleW`) | ✅ Done | ALPN capture via AcquireCredentialsHandleW |
 | M6 | Named-pipe IPC & C# collector | ✅ Done |
 | M7 | Analysis PoC (PII & prompt-injection regex) | ✅ Done |
 | M8 | End-to-end test script (Python) | ✅ Done (Windows run pending) |
-| M9 | Packaging (WiX installer) | ⏳ Template added – build pending |
+| M9 | Packaging (WiX installer) | ✅ Done | MSI builds successfully with WiX 6 |
 | M10 | Hardening / allow-lists / ETW logging | 🚧 Not started |
 
 ---
@@ -66,21 +66,16 @@ cmake --build build --target build_collector --config Release # dotnet publish
 ```
 
 ### 3.4 Packaging (WiX)
-The WiX custom target is **commented-out** until WiX 4 is installed and on *PATH*.
-Un-comment the block at the bottom of the root `CMakeLists.txt` once WiX is available:
-```cmake
-find_program(WIX_EXECUTABLE wix REQUIRED)
-add_custom_target(package_msi …)
-```
-Then build:
+WiX 6 is now configured and working. The MSI package builds successfully:
 ```powershell
 cmake --build build --target package_msi --config Release
 ```
+This creates `build\AIInterceptor.msi` containing all components (injector, hook DLL, and collector).
 
 ### 3.5 Troubleshooting
 * "platform Win32 vs x64" → delete **build/** and re-configure.
 * Missing dependencies (googletest) → correct `GIT_TAG` in `tests/CMakeLists.txt` (now `v1.14.0`).
-* WiX not found → ensure WiX 4 installed or keep packaging target disabled.
+* MSI build issues → ensure WiX 6 is installed as global dotnet tool: `dotnet tool install --global wix`
 
 ---
 
@@ -88,7 +83,7 @@ cmake --build build --target package_msi --config Release
 
 1. Launch collector:
    ```powershell
-   build\collector\bin\Release\net8.0\ai_collector.exe
+   build\collector\ai_collector.exe
    ```
 2. Start target via injector, e.g. Python script:
    ```powershell
@@ -162,7 +157,7 @@ Remove-Item -Recurse -Force build
 & $vsCmake --build build --config Release
 
 # Smoke test
-build\collector\bin\Release\net8.0\ai_collector.exe      # terminal 1
+build\collector\ai_collector.exe      # terminal 1
 build\injector\Release\ai_injector.exe \
     "C:\Python312\python.exe" tests\python\test_capture.py  # terminal 2
 ```
@@ -171,17 +166,17 @@ build\injector\Release\ai_injector.exe \
 
 | Category | ✅ Completed | ⏳ Blocking / TODO |
 |----------|-------------|-------------------|
-| Core hooks | WinHTTP, WebSocket, OpenSSL (`SSL_write`), Schannel | Add `SSL_read`; robust Electron renderer detour |
+| Core hooks | WinHTTP, WebSocket, OpenSSL (SSL_write & SSL_read), Schannel | Robust Electron renderer detour |
 | IPC | Named-pipe client (retry/back-off); collector supports 10 instances | Fail-safe pass-through on hook error |
-| Packaging | WiX template & custom CMake target | Fix `WIX0144`; sign MSI |
+| Packaging | WiX 6 MSI builds successfully with all components | Sign MSI for production deployment |
 | Tests | Python e2e verifies pipe traffic | GoogleTest for crypto hooks |
 
 ### 6.6 Next Steps (Priority Order)
 
-1. **Packaging (Milestone M9)** – locate WiX extension path, patch `CMakeLists.txt`, build MSI, add shortcuts & service.
-2. **Electron/Node Descendant Injection (M3.5-M3.7)** – monitor child PIDs for 30 s post-launch and inject on-the-fly.
-3. **Add `SSL_read` Detour** – mirror pattern-scanner, emit response body.
-4. **Security/Hardening (M10)** – allow/deny-list, ETW logging, config JSON.
+1. **Electron/Node Descendant Injection (M3.5-M3.7)** – monitor child PIDs for 30 s post-launch and inject on-the-fly.
+2. **Security/Hardening (M10)** – allow/deny-list, ETW logging, config JSON.
+3. **Code Signing** – sign binaries & MSI for production deployment.
+4. **Enhanced Analysis & Testing** - Improve collector analysis and add more comprehensive tests.
 
 ### 6.7 Useful Commands
 

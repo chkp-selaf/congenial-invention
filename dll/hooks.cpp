@@ -357,9 +357,43 @@ void InstallSslHooks() {
     const char ssl_get_servername_mask[] = "xxxx?xxx?xxx?xxxx?xxxx?xx";
 
     // TODO: Add robust pattern for SSL_read for chrome.dll or target module
-    // Example placeholder (this will NOT work and needs to be replaced):
-    const unsigned char ssl_read_pattern[] = { 0xAA, 0xBB, 0xCC, 0xDD }; 
-    const char ssl_read_mask[] = "xxxx";
+    // SSL_read patterns for different implementations
+    // Pattern 1: Common BoringSSL/OpenSSL SSL_read pattern (x64)
+    const unsigned char ssl_read_pattern1[] = { 
+        0x48, 0x89, 0x5C, 0x24, 0x08,  // mov [rsp+8], rbx
+        0x48, 0x89, 0x6C, 0x24, 0x10,  // mov [rsp+10h], rbp  
+        0x48, 0x89, 0x74, 0x24, 0x18,  // mov [rsp+18h], rsi
+        0x57,                           // push rdi
+        0x48, 0x83, 0xEC, 0x20,        // sub rsp, 20h
+        0x48, 0x8B, 0xF9,              // mov rdi, rcx (ssl parameter)
+        0x8B, 0xF2                     // mov esi, edx (num parameter)
+    };
+    const char ssl_read_mask1[] = "xxxx?xxxx?xxxx?xxxxxxxx";
+    
+    // Pattern 2: Alternative SSL_read pattern
+    const unsigned char ssl_read_pattern2[] = {
+        0x48, 0x83, 0xEC, 0x28,        // sub rsp, 28h
+        0x48, 0x85, 0xC9,              // test rcx, rcx
+        0x74, 0x0A,                    // jz short +0Ah
+        0x48, 0x8B, 0x01,              // mov rax, [rcx]
+        0xFF, 0x50, 0x20               // call qword ptr [rax+20h]
+    };
+    const char ssl_read_mask2[] = "xxxxxxxxxxxx";
+    
+    // Pattern 3: Node.js/Electron specific SSL_read
+    const unsigned char ssl_read_pattern3[] = {
+        0x40, 0x53,                    // push rbx
+        0x48, 0x83, 0xEC, 0x20,        // sub rsp, 20h
+        0x48, 0x8B, 0xD9,              // mov rbx, rcx
+        0x48, 0x85, 0xC9,              // test rcx, rcx
+        0x0F, 0x84                     // jz (long jump)
+    };
+    const char ssl_read_mask3[] = "xxxxxxxxxx??";
+
+    // Try multiple patterns
+    const unsigned char* ssl_read_patterns[] = { ssl_read_pattern1, ssl_read_pattern2, ssl_read_pattern3 };
+    const char* ssl_read_masks[] = { ssl_read_mask1, ssl_read_mask2, ssl_read_mask3 };
+    const int num_ssl_read_patterns = 3;
 
     // TODO: Add robust patterns for SSL_CTX_set_keylog_callback and SSL_new
     const unsigned char ssl_ctx_set_keylog_callback_pattern[] = { 0xBB, 0xCC, 0xDD, 0xEE };
@@ -381,9 +415,20 @@ void InstallSslHooks() {
         else OutputDebugStringW(L"SSL_get_servername pattern not found.");
     }
     if (!Real_SSL_read) {
-        ssl_read_addr = FindPattern(hTargetModuleForScanning, ssl_read_pattern, ssl_read_mask); 
+        ssl_read_addr = FindPattern(hTargetModuleForScanning, ssl_read_patterns[0], ssl_read_masks[0]); 
         if (ssl_read_addr) Real_SSL_read = (SSL_read_t)ssl_read_addr;
-        else OutputDebugStringW(L"SSL_read pattern not found.");
+        else {
+            for (int i = 1; i < num_ssl_read_patterns; ++i) {
+                ssl_read_addr = FindPattern(hTargetModuleForScanning, ssl_read_patterns[i], ssl_read_masks[i]);
+                if (ssl_read_addr) {
+                    Real_SSL_read = (SSL_read_t)ssl_read_addr;
+                    break;
+                }
+            }
+        }
+        if (!Real_SSL_read) {
+            OutputDebugStringW(L"SSL_read pattern not found.");
+        }
     }
     if (!Real_SSL_CTX_set_keylog_callback) {
         ssl_ctx_set_keylog_callback_addr = FindPattern(hTargetModuleForScanning, ssl_ctx_set_keylog_callback_pattern, ssl_ctx_set_keylog_callback_mask);

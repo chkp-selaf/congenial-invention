@@ -4,7 +4,14 @@ using System.Text.Json;
 using AiTrafficInterceptor.Collector;
 
 Console.WriteLine("AI Traffic Collector starting...");
-Console.WriteLine("Waiting for connection on \\\\.\\pipe\\ai-hook");
+
+bool verbose = args.Contains("--verbose", StringComparer.OrdinalIgnoreCase);
+if (verbose)
+{
+    Console.WriteLine("[Verbose mode ON] Raw JSON and decoded payloads will be printed.");
+}
+
+Console.WriteLine("Waiting for connection on \\.[2m\\pipe\\ai-hook[0m");
 
 const string pipeName = "ai-hook";
 var analysisEngine = new AnalysisEngine();
@@ -33,6 +40,15 @@ while (true) // Loop to allow reconnects
                 if (logEvent != null)
                 {
                     Console.WriteLine($"[{logEvent.Timestamp:s}] PID:{logEvent.ProcessId} API:{logEvent.Api} URL:{logEvent.Url}");
+                    if (verbose)
+                    {
+                        Console.WriteLine($"  Raw JSON: {line}");
+                        var decoded = logEvent.DecodedData;
+                        if (decoded != null && decoded.Length > 0)
+                        {
+                            Console.WriteLine($"  Decoded payload (first 500 bytes): {Encoding.UTF8.GetString(decoded.AsSpan(0, Math.Min(decoded.Length, 500)))}");
+                        }
+                    }
                     
                     var analysisResult = analysisEngine.Analyze(logEvent);
                     if (analysisResult.HasFindings)

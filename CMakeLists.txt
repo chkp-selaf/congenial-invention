@@ -49,27 +49,17 @@ add_custom_target(setup_python_test
 
 # Collector (C#) – built via dotnet; use custom target
 add_custom_target(build_collector ALL
-    COMMAND dotnet build ${CMAKE_CURRENT_SOURCE_DIR}/collector/Collector.csproj -c Release
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/collector
-    COMMENT "Building C# collector..."
+    COMMAND dotnet publish ${CMAKE_CURRENT_SOURCE_DIR}/collector/Collector.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o ${CMAKE_BINARY_DIR}/collector
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Publishing C# collector to build/collector"
 )
 
 find_program(WIX_EXECUTABLE wix REQUIRED)
 
-# Add a pre-build step to ensure the necessary WiX extension is installed
-add_custom_command(
-    OUTPUT ${CMAKE_BINARY_DIR}/wix_ext_util.stamp
-    COMMAND ${WIX_EXECUTABLE} extension add WixToolset.Util.wixext/6.0.1
-    COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_BINARY_DIR}/wix_ext_util.stamp
-    COMMENT "Ensuring WiX Util extension is available..."
-    VERBATIM
-)
-
 add_custom_target(package_msi
-    COMMAND ${WIX_EXECUTABLE} build -ext Wix.Util.dll -o ${CMAKE_BINARY_DIR}/AIInterceptor.msi ${CMAKE_SOURCE_DIR}/packaging/Product.wxs
+    COMMAND ${WIX_EXECUTABLE} build -o ${CMAKE_BINARY_DIR}/AIInterceptor.msi Product.wxs
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/packaging
     COMMENT "Building MSI package with WiX Toolset"
-    DEPENDS ${CMAKE_BINARY_DIR}/wix_ext_util.stamp
 )
 
 add_dependencies(package_msi ai_injector ai_hook build_collector)
