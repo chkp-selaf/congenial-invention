@@ -2,6 +2,7 @@
 #include <tlhelp32.h>
 #include <detours.h>
 #include <string>
+#include <winternl.h> // NtQueryInformationProcess
 #include <vector>
 #include <iostream>
 #include <filesystem> // For path manipulation (C++17)
@@ -29,6 +30,56 @@ static std::wstring GetProcessName(DWORD pid) {
 }
 
 // Simple helper to collect all child PIDs of a given parent process
+// Helper to get full command line of a process (best-effort). Returns empty string on failure.
+static std::wstring GetProcessCommandLine(DWORD pid) {
+    std::wstring result;
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+    if (!hProcess) return result;
+
+    // NtQueryInformationProcess -> PROCESS_BASIC_INFORMATION to get PEB address
+    PROCESS_BASIC_INFORMATION pbi{};
+    ULONG returned = 0;
+    using _NtQueryInformationProcess = NTSTATUS(WINAPI*)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+    static auto NtQueryInformationProcess = reinterpret_cast<_NtQueryInformationProcess>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"));
+    if (!NtQueryInformationProcess) { CloseHandle(hProcess); return result; }
+
+    if (NtQueryInformationProcess(hProcess, ProcessBasicInformation, &pbi, sizeof(pbi), &returned) != 0) {
+        CloseHandle(hProcess);
+        return result;
+    }
+
+    // Read RTL_USER_PROCESS_PARAMETERS pointer from PEB
+    PEB peb{};
+    SIZE_T bytesRead = 0;
+    if (!ReadProcessMemory(hProcess, pbi.PebBaseAddress, &peb, sizeof(peb), &bytesRead)) {
+        CloseHandle(hProcess);
+        return result;
+    }
+
+    RTL_USER_PROCESS_PARAMETERS params{};
+    if (!ReadProcessMemory(hProcess, peb.ProcessParameters, &params, sizeof(params), &bytesRead)) {
+        CloseHandle(hProcess);
+        return result;
+    }
+
+    // CommandLine is UNICODE_STRING {Length, MaximumLength, Buffer}
+    if (params.CommandLine.Length == 0 || !params.CommandLine.Buffer) {
+        CloseHandle(hProcess);
+        return result;
+    }
+
+    std::vector<wchar_t> buffer(params.CommandLine.Length / sizeof(wchar_t) + 1);
+    if (!ReadProcessMemory(hProcess, params.CommandLine.Buffer, buffer.data(), params.CommandLine.Length, &bytesRead)) {
+        CloseHandle(hProcess);
+        return result;
+    }
+    buffer[params.CommandLine.Length / sizeof(wchar_t)] = L'\0';
+    result.assign(buffer.data());
+    CloseHandle(hProcess);
+    return result;
+}
+
 static std::vector<DWORD> CollectChildPids(DWORD parentPid) {
     std::vector<DWORD> children;
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -110,14 +161,28 @@ bool StartProcessAndInject(const std::wstring& cmdline, DWORD* outPid) {
     std::wcout << L"[Injector] Process created with PID " << pi.dwProcessId << L", injecting DLL..." << std::endl;
     
     std::wstring absoluteDllPath = GetAbsoluteDllPath();
-    std::wcout << L"[Injector] Using DLL: " << absoluteDllPath << std::endl;
+
+    if (!std::filesystem::exists(absoluteDllPath)) {
+        std::wcerr << L"[Injector] ✗ CRITICAL: DLL not found at path: " << absoluteDllPath << std::endl;
+        std::wcerr << L"[Injector] This path is calculated relative to the injector's location." << std::endl;
+        std::wcerr << L"[Injector] Please ensure 'ai_hook.dll' exists and the build process places it correctly." << std::endl;
+        TerminateProcess(pi.hProcess, 1);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        return false;
+    }
+    
+    std::wcout << L"[Injector] Found DLL at: " << absoluteDllPath << std::endl;
     
     char dllPathA[MAX_PATH];
     WideCharToMultiByte(CP_ACP, 0, absoluteDllPath.c_str(), -1, dllPathA, MAX_PATH, nullptr, nullptr);
     const char* dlls[] = { dllPathA };
     if (!DetourUpdateProcessWithDll(pi.hProcess, dlls, 1)) {
-        std::wcerr << L"[Injector] DetourUpdateProcessWithDll failed: " << GetLastError() << std::endl;
+        DWORD error = GetLastError();
+        std::wcerr << L"[Injector] DetourUpdateProcessWithDll failed with error: " << error << std::endl;
         TerminateProcess(pi.hProcess, 1);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
         return false;
     }
 
@@ -182,7 +247,10 @@ int wmain(int argc, wchar_t* argv[]) {
     std::wcout << L"[Injector] Launching: " << final_cmdline << std::endl;
     // Launch main process and inject
     DWORD mainPid = 0;
-    if (!StartProcessAndInject(final_cmdline, &mainPid)) return 1;
+    if (!StartProcessAndInject(final_cmdline, &mainPid)) {
+        std::wcerr << L"[Injector] ✗ Failed to start and inject into the main process." << std::endl;
+        return 1;
+    }
 
     if (!withChildren) {
         std::wcout << L"[Injector] Main process launched successfully. Not monitoring children." << std::endl;
@@ -204,8 +272,22 @@ int wmain(int argc, wchar_t* argv[]) {
             auto kids = CollectChildPids(parent);
             for (DWORD kid : kids) {
                 if (injected.insert(kid).second) { // newly discovered
-                    if (InjectIntoProcess(kid, GetAbsoluteDllPath().c_str())) {
-                        // Success already logged in InjectIntoProcess
+                    std::wstring cmd = GetProcessCommandLine(kid);
+                    bool isRenderer = cmd.find(L"--type=renderer") != std::wstring::npos;
+                    bool isNodeHost = cmd.find(L"node ") != std::wstring::npos || GetProcessName(kid) == L"node.exe";
+                    bool isUtility = cmd.find(L"--type=utility") != std::wstring::npos || cmd.find(L"--type=gpu") != std::wstring::npos;
+
+                    if (isUtility) {
+                        std::wcout << L"[Injector] Skipping utility process PID " << kid << std::endl;
+                        continue;
+                    }
+
+                    if (isRenderer || isNodeHost) {
+                        if (InjectIntoProcess(kid, GetAbsoluteDllPath().c_str())) {
+                            // Success logged inside
+                        }
+                    } else {
+                        std::wcout << L"[Injector] Skipping unrelated child PID " << kid << std::endl;
                     }
                 }
                 queue.push_back(kid);

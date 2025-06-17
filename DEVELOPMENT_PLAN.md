@@ -11,7 +11,7 @@
 | M1 | Repository scaffold, CMake, Detours submodule | ✅ Done |
 | M2 | Injector (`ai_injector.exe`) | ✅ Done |
 | M3 | WinHTTP / WebSocket hooks | ✅ Done |
-| M3.5–3.7 | Electron & Node discovery/injection | ⚠️ Pending |
+| M3.5–3.7 | Electron & Node discovery/injection | ✅ Done | Now discovers renderers/nodes via command-line parsing |
 | M4 | OpenSSL/BoringSSL hooks (pattern-scan `SSL_write`) | ✅ Done | Bidirectional capture with `SSL_read` now complete |
 | M5 | Schannel hooks (`EncryptMessage`, `DecryptMessage`, `AcquireCredentialsHandleW`) | ✅ Done | ALPN capture via AcquireCredentialsHandleW |
 | M6 | Named-pipe IPC & C# collector | ✅ Done |

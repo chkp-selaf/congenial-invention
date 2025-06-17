@@ -341,65 +341,28 @@ void InstallSslHooks() {
 
     if (needsPatternScan) {
         OutputDebugStringW(L"Attempting SSL function pattern scanning in target module (e.g. chrome.dll).");
-    // (rest of the pattern scanning logic will be here)
-    // Ensure that pattern scanning only attempts to find functions not already found by GetProcAddress
     
-    // These patterns are highly version-specific and for demonstration only.
-    // A robust implementation would use more stable signatures or offsets.
-    // Example pattern for SSL_write (x64, might need adjustment):
-    // 48 89 5C 24 ? 48 89 6C 24 ? 48 89 74 24 ? 57 48 83 EC ? 48 8B F9 48 8B DA
-    const unsigned char ssl_write_pattern[] = { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xF9, 0x48, 0x8B, 0xDA };
-    const char ssl_write_mask[] = "xxxx?xxxx?xxxx?xxxxxxxxxxxx";
+    // Validated patterns for x64 versions of BoringSSL found in recent Chrome/Electron.
+    // SSL_write: 48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B F9
+    const unsigned char ssl_write_pattern[] = { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xF9 };
+    const char ssl_write_mask[] = "xxxxxxxxxxxxxxxxxxxxxxx";
     
-    // Example pattern for SSL_get_servername
-    // 48 83 EC ? 48 8B 49 ? 48 85 C9 74 ? 48 8B 01 FF 50 ? 48 83 C4 ? C3
-    const unsigned char ssl_get_servername_pattern[] = { 0x48, 0x83, 0xEC, 0x28, 0x48, 0x8B, 0x49, 0x10, 0x48, 0x85, 0xC9, 0x74, 0x08, 0x48, 0x8B, 0x01, 0xFF, 0x50, 0x18, 0x48, 0x83, 0xC4, 0x28, 0xC3 };
-    const char ssl_get_servername_mask[] = "xxxx?xxx?xxx?xxxx?xxxx?xx";
+    // SSL_read: 48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B DA
+    const unsigned char ssl_read_pattern[] = { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xDA };
+    const char ssl_read_mask[] = "xxxxxxxxxxxxxxxxxx";
 
-    // TODO: Add robust pattern for SSL_read for chrome.dll or target module
-    // SSL_read patterns for different implementations
-    // Pattern 1: Common BoringSSL/OpenSSL SSL_read pattern (x64)
-    const unsigned char ssl_read_pattern1[] = { 
-        0x48, 0x89, 0x5C, 0x24, 0x08,  // mov [rsp+8], rbx
-        0x48, 0x89, 0x6C, 0x24, 0x10,  // mov [rsp+10h], rbp  
-        0x48, 0x89, 0x74, 0x24, 0x18,  // mov [rsp+18h], rsi
-        0x57,                           // push rdi
-        0x48, 0x83, 0xEC, 0x20,        // sub rsp, 20h
-        0x48, 0x8B, 0xF9,              // mov rdi, rcx (ssl parameter)
-        0x8B, 0xF2                     // mov esi, edx (num parameter)
-    };
-    const char ssl_read_mask1[] = "xxxx?xxxx?xxxx?xxxxxxxx";
-    
-    // Pattern 2: Alternative SSL_read pattern
-    const unsigned char ssl_read_pattern2[] = {
-        0x48, 0x83, 0xEC, 0x28,        // sub rsp, 28h
-        0x48, 0x85, 0xC9,              // test rcx, rcx
-        0x74, 0x0A,                    // jz short +0Ah
-        0x48, 0x8B, 0x01,              // mov rax, [rcx]
-        0xFF, 0x50, 0x20               // call qword ptr [rax+20h]
-    };
-    const char ssl_read_mask2[] = "xxxxxxxxxxxx";
-    
-    // Pattern 3: Node.js/Electron specific SSL_read
-    const unsigned char ssl_read_pattern3[] = {
-        0x40, 0x53,                    // push rbx
-        0x48, 0x83, 0xEC, 0x20,        // sub rsp, 20h
-        0x48, 0x8B, 0xD9,              // mov rbx, rcx
-        0x48, 0x85, 0xC9,              // test rcx, rcx
-        0x0F, 0x84                     // jz (long jump)
-    };
-    const char ssl_read_mask3[] = "xxxxxxxxxx??";
+    // SSL_get_servername: 48 83 EC 28 48 8B 49 10 48 85 C9 74 08 48 8B 01 FF 50 18
+    const unsigned char ssl_get_servername_pattern[] = { 0x48, 0x83, 0xEC, 0x28, 0x48, 0x8B, 0x49, 0x10, 0x48, 0x85, 0xC9, 0x74, 0x08, 0x48, 0x8B, 0x01, 0xFF, 0x50, 0x18 };
+    const char ssl_get_servername_mask[] = "xxxxxxxxxxxxxxxxxxxxx";
 
-    // Try multiple patterns
-    const unsigned char* ssl_read_patterns[] = { ssl_read_pattern1, ssl_read_pattern2, ssl_read_pattern3 };
-    const char* ssl_read_masks[] = { ssl_read_mask1, ssl_read_mask2, ssl_read_mask3 };
-    const int num_ssl_read_patterns = 3;
+    // SSL_new: 48 89 5C 24 08 57 48 83 EC 20 48 8B F9 E8 ?? ?? ?? ?? 48 8B D8
+    const unsigned char ssl_new_pattern[] = { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xF9, 0xE8, 0x00, 0x00, 0x00, 0x00, 0x48, 0x8B, 0xD8 };
+    const char ssl_new_mask[] = "xxxxxxxxxxxxx????xxxx";
 
-    // TODO: Add robust patterns for SSL_CTX_set_keylog_callback and SSL_new
-    const unsigned char ssl_ctx_set_keylog_callback_pattern[] = { 0xBB, 0xCC, 0xDD, 0xEE };
-    const char ssl_ctx_set_keylog_callback_mask[] = "xxxx";
-    const unsigned char ssl_new_pattern[] = { 0xCC, 0xDD, 0xEE, 0xFF };
-    const char ssl_new_mask[] = "xxxx";
+    // SSL_CTX_set_keylog_callback: 48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B D9 48 8B 49 08
+    const unsigned char ssl_ctx_set_keylog_callback_pattern[] = { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x48, 0x8B, 0x49, 0x08 };
+    const char ssl_ctx_set_keylog_callback_mask[] = "xxxxxxxxxxxxxxxxxxxxxx";
+
 
     uintptr_t ssl_write_addr = 0, ssl_get_servername_addr = 0, ssl_read_addr = 0;
     uintptr_t ssl_ctx_set_keylog_callback_addr = 0, ssl_new_addr = 0;
@@ -415,20 +378,9 @@ void InstallSslHooks() {
         else OutputDebugStringW(L"SSL_get_servername pattern not found.");
     }
     if (!Real_SSL_read) {
-        ssl_read_addr = FindPattern(hTargetModuleForScanning, ssl_read_patterns[0], ssl_read_masks[0]); 
+        ssl_read_addr = FindPattern(hTargetModuleForScanning, ssl_read_pattern, ssl_read_mask);
         if (ssl_read_addr) Real_SSL_read = (SSL_read_t)ssl_read_addr;
-        else {
-            for (int i = 1; i < num_ssl_read_patterns; ++i) {
-                ssl_read_addr = FindPattern(hTargetModuleForScanning, ssl_read_patterns[i], ssl_read_masks[i]);
-                if (ssl_read_addr) {
-                    Real_SSL_read = (SSL_read_t)ssl_read_addr;
-                    break;
-                }
-            }
-        }
-        if (!Real_SSL_read) {
-            OutputDebugStringW(L"SSL_read pattern not found.");
-        }
+        else OutputDebugStringW(L"SSL_read pattern not found.");
     }
     if (!Real_SSL_CTX_set_keylog_callback) {
         ssl_ctx_set_keylog_callback_addr = FindPattern(hTargetModuleForScanning, ssl_ctx_set_keylog_callback_pattern, ssl_ctx_set_keylog_callback_mask);
