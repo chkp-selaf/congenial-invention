@@ -1,0 +1,3 @@
+AI Traffic Collector starting...
+[Verbose mode ON] Raw JSON and decoded payloads will be printed.
+Waiting for connection on \.[2m\pipe\ai-hook[0m

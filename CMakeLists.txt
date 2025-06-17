@@ -28,8 +28,18 @@ if(WIN32)
     # Subdirectories
     add_subdirectory(injector)
     add_subdirectory(dll)
+    add_subdirectory(renderer)
     add_subdirectory(tests)
+    add_subdirectory(packaging)
 endif()
+
+# Copy config directory to build output
+add_custom_target(copy_config ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/config
+            ${CMAKE_BINARY_DIR}/config
+    COMMENT "Copying config directory"
+)
 
 # Custom target to set up the Python test environment
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -54,12 +64,10 @@ add_custom_target(build_collector ALL
     COMMENT "Publishing C# collector to build/collector"
 )
 
-find_program(WIX_EXECUTABLE wix REQUIRED)
-
-add_custom_target(package_msi
-    COMMAND ${WIX_EXECUTABLE} build -o ${CMAKE_BINARY_DIR}/AIInterceptor.msi Product.wxs
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/packaging
-    COMMENT "Building MSI package with WiX Toolset"
+add_custom_target(build_proxy ALL
+    COMMAND dotnet publish ${CMAKE_CURRENT_SOURCE_DIR}/proxy/Proxy.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o ${CMAKE_BINARY_DIR}/proxy
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Publishing OpenAI-compatible proxy"
 )
 
-add_dependencies(package_msi ai_injector ai_hook build_collector)
+add_dependencies(build_proxy build_collector)

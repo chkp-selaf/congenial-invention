@@ -2,16 +2,29 @@ using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
 using AiTrafficInterceptor.Collector;
+using Serilog;
+using Serilog.Events;
 
-Console.WriteLine("AI Traffic Collector starting...");
+// --- Serilog Configuration ---
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Debug()
+    .WriteTo.Console(restrictedToMinimumLevel: LogEventLevel.Information)
+    .WriteTo.File("logs/aiti-collector-.log",
+        rollingInterval: RollingInterval.Day,
+        rollOnFileSizeLimit: true,
+        fileSizeLimitBytes: 10 * 1024 * 1024, // 10 MB
+        retainedFileCountLimit: 7)
+    .CreateLogger();
+
+Log.Information("AI Traffic Collector starting...");
 
 bool verbose = args.Contains("--verbose", StringComparer.OrdinalIgnoreCase);
 if (verbose)
 {
-    Console.WriteLine("[Verbose mode ON] Raw JSON and decoded payloads will be printed.");
+    Log.Information("[Verbose mode ON] Raw JSON and decoded payloads will be printed.");
 }
 
-Console.WriteLine("Waiting for connection on \\.[2m\\pipe\\ai-hook[0m");
+Log.Information("Waiting for connection on \\\\.\\pipe\\{PipeName}", "ai-hook");
 
 const string pipeName = "ai-hook";
 var analysisEngine = new AnalysisEngine();
@@ -23,7 +36,7 @@ while (true) // Loop to allow reconnects
         await using var server = new NamedPipeServerStream(pipeName, PipeDirection.In, 10, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
         await server.WaitForConnectionAsync();
 
-        Console.WriteLine("Client connected.");
+        Log.Information("Client connected.");
 
         using var reader = new StreamReader(server, Encoding.UTF8);
         while (server.IsConnected)
@@ -39,46 +52,40 @@ while (true) // Loop to allow reconnects
                 var logEvent = JsonSerializer.Deserialize<LogEvent>(line);
                 if (logEvent != null)
                 {
-                    Console.WriteLine($"[{logEvent.Timestamp:s}] PID:{logEvent.ProcessId} API:{logEvent.Api} URL:{logEvent.Url}");
+                    Log.Information("[{Timestamp:s}] PID:{ProcessId} API:{Api} URL:{Url}", 
+                        logEvent.Timestamp, logEvent.ProcessId, logEvent.Api, logEvent.Url);
+                        
                     if (verbose)
                     {
-                        Console.WriteLine($"  Raw JSON: {line}");
+                        Log.Debug("  Raw JSON: {RawJson}", line);
                         var decoded = logEvent.DecodedData;
                         if (decoded != null && decoded.Length > 0)
                         {
-                            Console.WriteLine($"  Decoded payload (first 500 bytes): {Encoding.UTF8.GetString(decoded.AsSpan(0, Math.Min(decoded.Length, 500)))}");
+                            Log.Debug("  Decoded payload (first 500 bytes): {Payload}", Encoding.UTF8.GetString(decoded.AsSpan(0, Math.Min(decoded.Length, 500))));
                         }
                     }
                     
                     var analysisResult = analysisEngine.Analyze(logEvent);
                     if (analysisResult.HasFindings)
                     {
-                        Console.ForegroundColor = ConsoleColor.Red;
                         foreach (var finding in analysisResult.Findings)
                         {
-                            Console.WriteLine($"  [!] {finding}");
+                            Log.Warning("  [!] {Finding}", finding);
                         }
-                        Console.ResetColor();
                     }
-
-                    // For verbose output of all data, uncomment below:
-                    // var decoded = logEvent.DecodedData;
-                    // if (decoded != null && decoded.Length > 0) {
-                    //     Console.WriteLine($"  Data: {Encoding.UTF8.GetString(decoded)}");
-                    // }
                 }
             }
             catch (JsonException ex)
             {
-                Console.WriteLine($"Error deserializing JSON: {ex.Message}");
+                Log.Error(ex, "Error deserializing JSON: {Message}", ex.Message);
             }
         }
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"An error occurred: {ex.Message}");
+        Log.Error(ex, "An error occurred: {Message}", ex.Message);
     }
 
-    Console.WriteLine("Client disconnected. Waiting for new connection...");
+    Log.Information("Client disconnected. Waiting for new connection...");
     await Task.Delay(1000); // Prevent tight loop on error
 }

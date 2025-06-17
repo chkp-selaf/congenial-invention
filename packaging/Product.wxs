@@ -41,6 +41,20 @@
             <Component Id="HookDll" Guid="*">
                 <File Id="HookDllFile" Source="..\build\dll\Release\ai_hook.dll" KeyPath="yes" />
             </Component>
+            <Component Id="ProxyExe" Guid="*">
+                <File Id="ProxyExeFile" Source="..\build\proxy\ai_proxy.exe" KeyPath="yes" />
+            </Component>
+            <Component Id="PreloadJs" Guid="*">
+                <File Id="PreloadJsFile" Source="..\build\renderer\preload.js" KeyPath="yes" />
+            </Component>
         </ComponentGroup>
+
+        <DirectoryRef Id="INSTALLFOLDER">
+            <Directory Id="ConfigDir" Name="config">
+                <Component Id="ConfigComponent" Guid="*">
+                    <File Id="ConfigFile" Source="..\build\config\aiti_config.json" KeyPath="yes" />
+                </Component>
+            </Directory>
+        </DirectoryRef>
     </Package>
 </Wix>

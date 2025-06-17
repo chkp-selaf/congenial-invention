@@ -9,6 +9,12 @@
 #include <algorithm>
 #include <unordered_set>
 #include <chrono>
+#include <fstream>      // For std::ifstream
+#include "json.h" // For parsing config
+
+// --- Globals for Configuration ---
+static std::unordered_set<std::wstring> g_allowList;
+static bool g_configLoaded = false;
 
 // Helper to get process name from PID
 static std::wstring GetProcessName(DWORD pid) {
@@ -27,6 +33,46 @@ static std::wstring GetProcessName(DWORD pid) {
     }
     CloseHandle(snap);
     return L"<unknown>";
+}
+
+// Helper to load config from json file
+static void LoadConfig() {
+    wchar_t injectorPath[MAX_PATH];
+    if (GetModuleFileNameW(NULL, injectorPath, MAX_PATH) == 0) {
+        std::wcerr << L"[Injector] Could not get injector path. Allow-list will not be used." << std::endl;
+        return;
+    }
+
+    std::filesystem::path configPath = std::filesystem::path(injectorPath).parent_path() / L".." / L"config" / L"aiti_config.json";
+    configPath = std::filesystem::absolute(configPath).lexically_normal();
+    
+    if (!std::filesystem::exists(configPath)) {
+        std::wcerr << L"[Injector] Config file not found at " << configPath << ". All processes will be allowed." << std::endl;
+        return;
+    }
+
+    std::ifstream configFile(configPath);
+    if (!configFile.is_open()) {
+        std::wcerr << L"[Injector] Could not open config file. All processes will be allowed." << std::endl;
+        return;
+    }
+
+    try {
+        nlohmann::json configJson = nlohmann::json::parse(configFile);
+        if (configJson.contains("process_allow_list")) {
+            for (const auto& item : configJson["process_allow_list"]) {
+                std::string s = item.get<std::string>();
+                std::wstring ws(s.begin(), s.end());
+                g_allowList.insert(ws);
+            }
+            std::wcout << L"[Injector] Loaded " << g_allowList.size() << L" processes into the allow-list." << std::endl;
+        }
+    } catch (const nlohmann::json::parse_error& e) {
+        std::wcerr << L"[Injector] Failed to parse config file: " << e.what() << ". All processes will be allowed." << std::endl;
+        return;
+    }
+    
+    g_configLoaded = true;
 }
 
 // Simple helper to collect all child PIDs of a given parent process
@@ -100,6 +146,15 @@ static std::vector<DWORD> CollectChildPids(DWORD parentPid) {
 
 static bool InjectIntoProcess(DWORD pid, const wchar_t* dllPath) {
     std::wstring processName = GetProcessName(pid);
+
+    // --- Allow-list Check ---
+    if (g_configLoaded && !g_allowList.empty()) {
+        if (g_allowList.find(processName) == g_allowList.end()) {
+            std::wcout << L"[Injector] Skipping non-allowed process: " << processName << std::endl;
+            return false; // Not an error, just skipping
+        }
+    }
+    
     std::wcout << L"[Injector] Attempting injection into PID " << pid << L" (" << processName << L")" << std::endl;
     std::wcout << L"[Injector] Using DLL: " << dllPath << std::endl;
     
@@ -200,6 +255,8 @@ int wmain(int argc, wchar_t* argv[]) {
         std::wcerr << L"Usage: ai_injector [--with-children] <command line>" << std::endl;
         return 1;
     }
+
+    LoadConfig(); // Load the allow-list at startup
 
     bool withChildren = false;
     int firstCmdArg = 1;
