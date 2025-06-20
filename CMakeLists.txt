@@ -3,7 +3,8 @@ cmake_minimum_required(VERSION 3.21)
 project(ai_traffic_interceptor)
 
 if(MSVC)
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    # Use dynamic CRT to ensure availability of debug CRT functions like _CrtDbgReport
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL$<$<CONFIG:Debug>:Debug>")
 endif()
 
 # Enable folders in IDEs
