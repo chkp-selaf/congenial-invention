@@ -11,6 +11,9 @@
 #include <chrono>
 #include <fstream>      // For std::ifstream
 #include "nlohmann/json.hpp" // For parsing config
+#include <sstream>
+#include <regex>
+#pragma comment(lib, "shlwapi.lib")
 
 // --- Globals for Configuration ---
 static std::unordered_set<std::wstring> g_allowList;
@@ -229,6 +232,69 @@ static std::wstring GetAbsoluteDllPath() {
     return candidates.front().wstring();
 }
 
+static void LogCreateProcessDiagnostics(const std::wstring& cmdline)
+{
+    std::wcerr << L"[Injector] ===== CreateProcess diagnostics =====" << std::endl;
+
+    // Current working directory
+    wchar_t cwdBuf[MAX_PATH];
+    if (GetCurrentDirectoryW(MAX_PATH, cwdBuf)) {
+        std::wcerr << L"  Working directory: " << cwdBuf << std::endl;
+    }
+
+    // Extract executable token
+    std::wstring exeToken;
+    {
+        size_t start = 0;
+        while (start < cmdline.size() && iswspace(cmdline[start])) ++start;
+        if (start >= cmdline.size()) goto afterToken;
+        if (cmdline[start] == L'\"') {
+            size_t end = cmdline.find(L'\"', start + 1);
+            exeToken = cmdline.substr(start + 1, end != std::wstring::npos ? end - start - 1 : std::wstring::npos);
+        } else {
+            size_t endSpace = cmdline.find(L' ', start);
+            exeToken = cmdline.substr(start, endSpace - start);
+        }
+    }
+afterToken:
+    if (!exeToken.empty()) {
+        std::wcerr << L"  Executable token: " << exeToken << std::endl;
+
+        // Check if file exists as-is (absolute or relative)
+        std::error_code ec;
+        auto absPath = std::filesystem::absolute(exeToken, ec);
+        if (!ec && std::filesystem::exists(absPath)) {
+            std::wcerr << L"  → File exists at: " << absPath << std::endl;
+        } else {
+            std::wcerr << L"  → File NOT found at token path." << std::endl;
+
+            // If token has no path separators, try looking along PATH
+            if (exeToken.find(L'\\') == std::wstring::npos && exeToken.find(L'/') == std::wstring::npos) {
+                wchar_t found[MAX_PATH];
+                if (SearchPathW(nullptr, exeToken.c_str(), L".exe", MAX_PATH, found, nullptr) > 0) {
+                    std::wcerr << L"  → Found via PATH at: " << found << std::endl;
+                } else {
+                    std::wcerr << L"  → Not found via PATH." << std::endl;
+                }
+            }
+        }
+    }
+
+    // Dump PATH env var (shortened if huge)
+    DWORD needed = GetEnvironmentVariableW(L"PATH", nullptr, 0);
+    if (needed) {
+        std::wstring pathEnv(needed, L'\0');
+        GetEnvironmentVariableW(L"PATH", pathEnv.data(), needed);
+        pathEnv.resize(needed - 1);
+        if (pathEnv.size() > 300) {
+            pathEnv = pathEnv.substr(0, 300) + L"...";
+        }
+        std::wcerr << L"  PATH: " << pathEnv << std::endl;
+    }
+
+    std::wcerr << L"[Injector] =====================================" << std::endl;
+}
+
 // Simple wrapper around CreateProcessW + DetourUpdateProcessWithDllW
 bool StartProcessAndInject(const std::wstring& cmdline, DWORD* outPid) {
     STARTUPINFOW si{sizeof(si)};
@@ -237,7 +303,9 @@ bool StartProcessAndInject(const std::wstring& cmdline, DWORD* outPid) {
     std::wcout << L"[Injector] Creating process..." << std::endl;
     if (!CreateProcessW(nullptr, const_cast<LPWSTR>(cmdline.c_str()), nullptr, nullptr,
                         FALSE, CREATE_SUSPENDED, nullptr, nullptr, &si, &pi)) {
-        std::wcerr << L"[Injector] CreateProcess failed: " << GetLastError() << std::endl;
+        DWORD err = GetLastError();
+        std::wcerr << L"[Injector] CreateProcess failed with error " << err << std::endl;
+        LogCreateProcessDiagnostics(cmdline);
         return false;
     }
 
