@@ -8,7 +8,7 @@ static HANDLE g_hPipe = INVALID_HANDLE_VALUE;
 static std::mutex g_pipeMutex;
 constexpr const wchar_t* kPipeName = L"\\\\.\\pipe\\ai-hook";
 
-void PipeInitialize() {
+void PipeClientInit() {
     std::lock_guard<std::mutex> lock(g_pipeMutex);
     if (g_hPipe != INVALID_HANDLE_VALUE) {
         return; // Already initialized
@@ -53,7 +53,7 @@ void PipeInitialize() {
     }
 }
 
-void PipeShutdown() {
+void PipeClientShutdown() {
     std::lock_guard<std::mutex> lock(g_pipeMutex);
     if (g_hPipe != INVALID_HANDLE_VALUE) {
         CloseHandle(g_hPipe);

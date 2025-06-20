@@ -4,6 +4,8 @@ using System.Text.Json;
 using AiTrafficInterceptor.Collector;
 using Serilog;
 using Serilog.Events;
+using LogEventLevel = Serilog.Events.LogEventLevel;
+using CollectorLogEvent = AiTrafficInterceptor.Collector.LogEvent;
 
 // --- Serilog Configuration ---
 Log.Logger = new LoggerConfiguration()
@@ -49,7 +51,7 @@ while (true) // Loop to allow reconnects
 
             try
             {
-                var logEvent = JsonSerializer.Deserialize<LogEvent>(line);
+                var logEvent = JsonSerializer.Deserialize<CollectorLogEvent>(line);
                 if (logEvent != null)
                 {
                     Log.Information("[{Timestamp:s}] PID:{ProcessId} API:{Api} URL:{Url}", 

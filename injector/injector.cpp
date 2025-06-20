@@ -10,7 +10,7 @@
 #include <unordered_set>
 #include <chrono>
 #include <fstream>      // For std::ifstream
-#include "json.h" // For parsing config
+#include "nlohmann/json.hpp" // For parsing config
 
 // --- Globals for Configuration ---
 static std::unordered_set<std::wstring> g_allowList;
@@ -184,21 +184,36 @@ constexpr const wchar_t* kDllPath = L"build\\dll\\Release\\ai_hook.dll";
 
 // Helper to get absolute DLL path
 static std::wstring GetAbsoluteDllPath() {
+    // Gather candidate relative paths
+    std::vector<std::filesystem::path> candidates;
+
+    // 1. If injector is in build_vs\injector\Release, go up three levels and into build_vs\dll\Release
     wchar_t injectorPath[MAX_PATH];
-    if (GetModuleFileNameW(NULL, injectorPath, MAX_PATH) == 0) {
-        return L"build\\dll\\Release\\ai_hook.dll"; // fallback to relative
+    if (GetModuleFileNameW(NULL, injectorPath, MAX_PATH) != 0) {
+        std::filesystem::path base = std::filesystem::path(injectorPath).parent_path();
+        // build_vs variant
+        candidates.push_back(base / L".." / L".." / L".." / L"dll" / L"Release" / L"ai_hook.dll");
+        // build variant
+        candidates.push_back(base / L".." / L".." / L".." / L".." / L"build" / L"dll" / L"Release" / L"ai_hook.dll");
     }
-    
-    std::filesystem::path dllPath = std::filesystem::path(injectorPath).parent_path()
-        / L".." / L".." / L".." / L"build" / L"dll" / L"Release" / L"ai_hook.dll";
-    dllPath = std::filesystem::absolute(dllPath).lexically_normal();
-    
-    if (std::filesystem::exists(dllPath)) {
-        return dllPath.wstring();
+
+    // 2. Same directory as injector
+    candidates.push_back(std::filesystem::path(L"ai_hook.dll"));
+
+    // 3. Common relative output dirs
+    candidates.push_back(std::filesystem::path(L"build_vs") / L"dll" / L"Release" / L"ai_hook.dll");
+    candidates.push_back(std::filesystem::path(L"build") / L"dll" / L"Release" / L"ai_hook.dll");
+
+    for (auto& p : candidates) {
+        std::error_code ec;
+        auto full = std::filesystem::absolute(p, ec);
+        if (!ec && std::filesystem::exists(full)) {
+            return full.lexically_normal().wstring();
+        }
     }
-    
-    // Fallback: try relative path
-    return L"build\\dll\\Release\\ai_hook.dll";
+
+    // If nothing found, return first candidate (may be relative)
+    return candidates.front().wstring();
 }
 
 // Simple wrapper around CreateProcessW + DetourUpdateProcessWithDllW

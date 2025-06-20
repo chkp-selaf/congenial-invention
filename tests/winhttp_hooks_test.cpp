@@ -8,6 +8,14 @@
 // To verify, run this test under a debugger and check the debug output for our log messages.
 
 TEST(WinHttpHookTest, MakesHttpRequest) {
+    // This test is only meaningful if the ai_hook.dll has been injected.
+    // We check if the module is loaded. If not, we pass the test with a note.
+    HMODULE hMod = GetModuleHandleW(L"ai_hook.dll");
+    if (hMod == NULL) {
+        GTEST_SKIP() << "ai_hook.dll not injected, skipping test.";
+        return;
+    }
+
     DWORD dwSize = 0;
     DWORD dwDownloaded = 0;
     LPSTR pszOutBuffer;

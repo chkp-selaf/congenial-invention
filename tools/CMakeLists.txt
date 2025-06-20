@@ -1,0 +1,5 @@
+add_executable(dll_diag dll_diag.cpp)
+if(MSVC)
+    target_compile_options(dll_diag PRIVATE /MT)
+endif()
+set_target_properties(dll_diag PROPERTIES FOLDER "tools") 

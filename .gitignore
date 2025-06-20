@@ -37,3 +37,10 @@ vcpkg_installed/
 
 # User-specific
 .vs/
+
+# Visual Studio CMake build directory
+build_vs/
+vs_build/
+
+# Logs
+logs/
