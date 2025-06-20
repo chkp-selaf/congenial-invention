@@ -179,40 +179,53 @@ static bool InjectIntoProcess(DWORD pid, const wchar_t* dllPath) {
     return ok == TRUE;
 }
 
-// TODO: replace with configurable path or resource
-constexpr const wchar_t* kDllPath = L"build\\dll\\Release\\ai_hook.dll";
-
-// Helper to get absolute DLL path
+// Helper to get absolute DLL path, matching the injector's build configuration.
 static std::wstring GetAbsoluteDllPath() {
-    // Gather candidate relative paths
+    // Detect build configuration of this injector.
+#ifdef _DEBUG
+    constexpr const wchar_t* kConfig = L"Debug";
+#else
+    constexpr const wchar_t* kConfig = L"Release";
+#endif
+
+#ifdef _DEBUG
+    std::wcout << L"[Injector] (debug) Resolving DLL path for " << kConfig << L" build..." << std::endl;
+#endif
+
     std::vector<std::filesystem::path> candidates;
 
-    // 1. If injector is in build_vs\injector\Release, go up three levels and into build_vs\dll\Release
+    // 1. Based on injector location inside build_vs/<component>/<config>
     wchar_t injectorPath[MAX_PATH];
     if (GetModuleFileNameW(NULL, injectorPath, MAX_PATH) != 0) {
         std::filesystem::path base = std::filesystem::path(injectorPath).parent_path();
-        // build_vs variant
-        candidates.push_back(base / L".." / L".." / L".." / L"dll" / L"Release" / L"ai_hook.dll");
-        // build variant
-        candidates.push_back(base / L".." / L".." / L".." / L".." / L"build" / L"dll" / L"Release" / L"ai_hook.dll");
+        candidates.push_back(base / L".." / L".." / L".." / L"dll" / kConfig / L"ai_hook.dll");
+        // Non build_vs variant (build/)
+        candidates.push_back(base / L".." / L".." / L".." / L".." / L"build" / L"dll" / kConfig / L"ai_hook.dll");
     }
 
     // 2. Same directory as injector
     candidates.push_back(std::filesystem::path(L"ai_hook.dll"));
 
-    // 3. Common relative output dirs
-    candidates.push_back(std::filesystem::path(L"build_vs") / L"dll" / L"Release" / L"ai_hook.dll");
-    candidates.push_back(std::filesystem::path(L"build") / L"dll" / L"Release" / L"ai_hook.dll");
+    // 3. Common relative paths
+    candidates.push_back(std::filesystem::path(L"build_vs") / L"dll" / kConfig / L"ai_hook.dll");
+    candidates.push_back(std::filesystem::path(L"build") / L"dll" / kConfig / L"ai_hook.dll");
 
-    for (auto& p : candidates) {
+    for (const auto& p : candidates) {
         std::error_code ec;
         auto full = std::filesystem::absolute(p, ec);
         if (!ec && std::filesystem::exists(full)) {
+#ifdef _DEBUG
+            std::wcout << L"[Injector] (debug) Found DLL candidate: " << full << std::endl;
+#endif
             return full.lexically_normal().wstring();
+        } else {
+#ifdef _DEBUG
+            std::wcout << L"[Injector] (debug) Candidate not found: " << p << std::endl;
+#endif
         }
     }
 
-    // If nothing found, return first candidate (may be relative)
+    // Return first candidate even if missing
     return candidates.front().wstring();
 }
 
@@ -317,6 +330,9 @@ int wmain(int argc, wchar_t* argv[]) {
     std::wstring final_cmdline = L"\"" + executable_path + L"\"" + arguments;
 
     std::wcout << L"[Injector] Launching: " << final_cmdline << std::endl;
+#ifdef _DEBUG
+    std::wcout << L"[Injector] (debug) Calling CreateProcessW..." << std::endl;
+#endif
     // Launch main process and inject
     DWORD mainPid = 0;
     if (!StartProcessAndInject(final_cmdline, &mainPid)) {
