@@ -40,6 +40,7 @@ vcpkg_installed/
 
 # Visual Studio CMake build directory
 build_vs/
+build_vs_arm64/
 vs_build/
 
 # Logs
