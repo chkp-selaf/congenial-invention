@@ -239,9 +239,9 @@ static std::wstring GetAbsoluteDllPath() {
     wchar_t injectorPath[MAX_PATH];
     if (GetModuleFileNameW(NULL, injectorPath, MAX_PATH) != 0) {
         std::filesystem::path base = std::filesystem::path(injectorPath).parent_path();
-        candidates.push_back(base / L".." / L".." / L".." / L"dll" / kConfig / L"ai_hook.dll");
+        candidates.push_back(base.parent_path().parent_path() / L"dll" / kConfig / L"ai_hook.dll");
         // Non build_vs variant (build/)
-        candidates.push_back(base / L".." / L".." / L".." / L".." / L"build" / L"dll" / kConfig / L"ai_hook.dll");
+        candidates.push_back(base.parent_path().parent_path().parent_path() / L"build" / L"dll" / kConfig / L"ai_hook.dll");
     }
 
     // 2. Same directory as injector
@@ -369,20 +369,23 @@ bool StartProcessAndInject(const std::wstring& cmdline, DWORD* outPid) {
     WORD targetArch = GetProcessArchitecture(pi.hProcess);
 
     if (injectorArch != 0 && targetArch != 0 && injectorArch != targetArch) {
-        std::wcerr << L"\n[Injector] ✗ CRITICAL: Architecture Mismatch!" << std::endl;
-        std::wcerr << L"  Injector is: " << MachineTypeToString(injectorArch).c_str() << std::endl;
-        std::wcerr << L"  Target EXE is: " << MachineTypeToString(targetArch).c_str() << std::endl;
-        std::wcerr << L"  This is guaranteed to fail with a 0xc000007b error. Aborting." << std::endl;
-        std::wcerr << L"  Please build the injector and DLL for the correct architecture (e.g., cmake -A ARM64 or -A x64)." << std::endl;
+        fwprintf(stderr, L"\n[Injector] ✗ CRITICAL: Architecture Mismatch!\n");
+        fwprintf(stderr, L"  Injector is: %hs\n", MachineTypeToString(injectorArch).c_str());
+        fwprintf(stderr, L"  Target EXE is: %hs\n", MachineTypeToString(targetArch).c_str());
+        fwprintf(stderr, L"  This is guaranteed to fail with a 0xc000007b error. Aborting.\n");
+        fwprintf(stderr, L"  Please build the injector and DLL for the correct architecture (e.g., cmake -A ARM64 or -A x64).\n");
+        fflush(stderr);
 
         TerminateProcess(pi.hProcess, 1);
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
         return false;
     } else if (targetArch == 0) {
-        std::wcout << L"[Injector] (warning) Could not determine target process architecture. Proceeding with caution." << std::endl;
+        wprintf(L"[Injector] (warning) Could not determine target process architecture. Proceeding with caution.\n");
+        fflush(stdout);
     } else {
-        std::wcout << L"[Injector] ✓ Architecture match validated (" << MachineTypeToString(targetArch).c_str() << ")." << std::endl;
+        wprintf(L"[Injector] ✓ Architecture match validated (%hs).\n", MachineTypeToString(targetArch).c_str());
+        fflush(stdout);
     }
     // ===================================
     
