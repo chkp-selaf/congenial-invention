@@ -99,21 +99,16 @@ else()
 endif()
 
 # Collector (C#) – built via dotnet; use custom target
-find_program(DOTNET_EXECUTABLE dotnet)
-if(DOTNET_EXECUTABLE)
-    add_custom_target(build_collector ALL
-        COMMAND dotnet publish ${CMAKE_CURRENT_SOURCE_DIR}/collector/Collector.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o ${CMAKE_BINARY_DIR}/collector
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        COMMENT "Publishing C# collector to build/collector"
-    )
+add_custom_target(build_collector
+    COMMAND dotnet publish ${CMAKE_CURRENT_SOURCE_DIR}/collector/Collector.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o ${CMAKE_BINARY_DIR}/collector
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Publishing C# collector to build/collector"
+)
 
-    add_custom_target(build_proxy ALL
-        COMMAND dotnet publish ${CMAKE_CURRENT_SOURCE_DIR}/proxy/Proxy.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o ${CMAKE_BINARY_DIR}/proxy
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        COMMENT "Publishing OpenAI-compatible proxy"
-    )
+add_custom_target(build_proxy
+    COMMAND dotnet publish ${CMAKE_CURRENT_SOURCE_DIR}/proxy/Proxy.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o ${CMAKE_BINARY_DIR}/proxy
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Publishing OpenAI-compatible proxy"
+)
 
-    add_dependencies(build_proxy build_collector)
-else()
-    message(WARNING "dotnet executable not found; skipping C# targets.")
-endif()
+add_dependencies(build_proxy build_collector)
