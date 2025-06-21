@@ -112,3 +112,12 @@ add_custom_target(build_proxy
 )
 
 add_dependencies(build_proxy build_collector)
+
+# ---------------------------------------------------------------------------
+# Compatibility shim: legacy 'copy_preload' target
+# Some subprojects/dependencies may still reference this target. Define it as
+# a no-op so the build graph resolves even if no longer used. Remove once all
+# references have been cleaned up.
+if(NOT TARGET copy_preload)
+    add_custom_target(copy_preload)
+endif()
