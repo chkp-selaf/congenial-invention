@@ -39,11 +39,11 @@ jobs:
 
     - name: Build C# Collector
       run: |
-        dotnet build collector/Collector.csproj -c Release
+        cmake --build build --config Release --target build_collector
 
     - name: Build C# Proxy
       run: |
-        dotnet build proxy/Proxy.csproj -c Release
+        cmake --build build --config Release --target build_proxy
 
     - name: Install WiX Toolset
       shell: pwsh
