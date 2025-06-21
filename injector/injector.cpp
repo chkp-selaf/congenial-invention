@@ -10,6 +10,7 @@
 #include <unordered_set>
 #include <chrono>
 #include <fstream>      // For std::ifstream
+#include <processthreadsapi.h> // For IsWow64Process2
 #include "nlohmann/json.hpp" // For parsing config
 #include <sstream>
 #include <regex>
@@ -18,6 +19,43 @@
 // --- Globals for Configuration ---
 static std::unordered_set<std::wstring> g_allowList;
 static bool g_configLoaded = false;
+
+// Helper to get a descriptive string for a machine architecture type
+static std::string MachineTypeToString(WORD machine) {
+    switch (machine) {
+        case IMAGE_FILE_MACHINE_I386:  return "x86";
+        case IMAGE_FILE_MACHINE_AMD64: return "x64 (AMD64)";
+        case IMAGE_FILE_MACHINE_ARM64: return "ARM64";
+        case IMAGE_FILE_MACHINE_ARM:   return "ARM";
+        default: return "Unknown";
+    }
+}
+
+// Gets the architecture of a running process. Returns 0 on failure.
+static WORD GetProcessArchitecture(HANDLE hProcess) {
+    USHORT processMachine = 0;
+    USHORT nativeMachine = 0;
+    if (IsWow64Process2(hProcess, &processMachine, &nativeMachine)) {
+        if (processMachine == IMAGE_FILE_MACHINE_UNKNOWN) {
+            return nativeMachine; // Process is running natively
+        }
+        return processMachine; // Process is running under WOW64
+    }
+    return 0; // Failed to get architecture
+}
+
+// Gets the architecture of the current injector process based on compile-time macros.
+static WORD GetInjectorArchitecture() {
+#if defined(_M_AMD64)
+    return IMAGE_FILE_MACHINE_AMD64;
+#elif defined(_M_ARM64)
+    return IMAGE_FILE_MACHINE_ARM64;
+#elif defined(_M_IX86)
+    return IMAGE_FILE_MACHINE_I386;
+#else
+    return 0; // Unknown architecture
+#endif
+}
 
 // Helper to get process name from PID
 static std::wstring GetProcessName(DWORD pid) {
@@ -232,9 +270,24 @@ static std::wstring GetAbsoluteDllPath() {
     return candidates.front().wstring();
 }
 
-static void LogCreateProcessDiagnostics(const std::wstring& cmdline)
+static std::wstring Win32ErrorMessage(DWORD code)
+{
+    LPWSTR buf = nullptr;
+    DWORD len = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                               nullptr, code, 0, (LPWSTR)&buf, 0, nullptr);
+    std::wstring msg = (len && buf) ? std::wstring(buf, len) : L"<no message>";
+    if (buf) LocalFree(buf);
+    // Trim trailing newlines
+    while (!msg.empty() && (msg.back() == L'\r' || msg.back() == L'\n')) msg.pop_back();
+    return msg;
+}
+
+static void LogCreateProcessDiagnostics(const std::wstring& cmdline, DWORD errorCode)
 {
     std::wcerr << L"[Injector] ===== CreateProcess diagnostics =====" << std::endl;
+
+    std::wcerr << L"  Error code: " << errorCode << L" (" << Win32ErrorMessage(errorCode) << L")" << std::endl;
+    std::wcerr << L"  Full command line: " << cmdline << std::endl;
 
     // Current working directory
     wchar_t cwdBuf[MAX_PATH];
@@ -264,17 +317,17 @@ afterToken:
         std::error_code ec;
         auto absPath = std::filesystem::absolute(exeToken, ec);
         if (!ec && std::filesystem::exists(absPath)) {
-            std::wcerr << L"  → File exists at: " << absPath << std::endl;
+            std::wcerr << L"  -> File exists at: " << absPath << std::endl;
         } else {
-            std::wcerr << L"  → File NOT found at token path." << std::endl;
+            std::wcerr << L"  -> File NOT found at token path." << std::endl;
 
             // If token has no path separators, try looking along PATH
             if (exeToken.find(L'\\') == std::wstring::npos && exeToken.find(L'/') == std::wstring::npos) {
                 wchar_t found[MAX_PATH];
                 if (SearchPathW(nullptr, exeToken.c_str(), L".exe", MAX_PATH, found, nullptr) > 0) {
-                    std::wcerr << L"  → Found via PATH at: " << found << std::endl;
+                    std::wcerr << L"  -> Found via PATH at: " << found << std::endl;
                 } else {
-                    std::wcerr << L"  → Not found via PATH." << std::endl;
+                    std::wcerr << L"  -> Not found via PATH." << std::endl;
                 }
             }
         }
@@ -304,12 +357,34 @@ bool StartProcessAndInject(const std::wstring& cmdline, DWORD* outPid) {
     if (!CreateProcessW(nullptr, const_cast<LPWSTR>(cmdline.c_str()), nullptr, nullptr,
                         FALSE, CREATE_SUSPENDED, nullptr, nullptr, &si, &pi)) {
         DWORD err = GetLastError();
-        std::wcerr << L"[Injector] CreateProcess failed with error " << err << std::endl;
-        LogCreateProcessDiagnostics(cmdline);
+        std::wcerr << L"[Injector] CreateProcess failed with error " << err << L" (" << Win32ErrorMessage(err) << L")" << std::endl;
+        LogCreateProcessDiagnostics(cmdline, err);
         return false;
     }
 
-    std::wcout << L"[Injector] Process created with PID " << pi.dwProcessId << L", injecting DLL..." << std::endl;
+    std::wcout << L"[Injector] Process created with PID " << pi.dwProcessId << L", verifying architecture..." << std::endl;
+    
+    // === Architecture Mismatch Check ===
+    WORD injectorArch = GetInjectorArchitecture();
+    WORD targetArch = GetProcessArchitecture(pi.hProcess);
+
+    if (injectorArch != 0 && targetArch != 0 && injectorArch != targetArch) {
+        std::wcerr << L"\n[Injector] ✗ CRITICAL: Architecture Mismatch!" << std::endl;
+        std::wcerr << L"  Injector is: " << MachineTypeToString(injectorArch).c_str() << std::endl;
+        std::wcerr << L"  Target EXE is: " << MachineTypeToString(targetArch).c_str() << std::endl;
+        std::wcerr << L"  This is guaranteed to fail with a 0xc000007b error. Aborting." << std::endl;
+        std::wcerr << L"  Please build the injector and DLL for the correct architecture (e.g., cmake -A ARM64 or -A x64)." << std::endl;
+
+        TerminateProcess(pi.hProcess, 1);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        return false;
+    } else if (targetArch == 0) {
+        std::wcout << L"[Injector] (warning) Could not determine target process architecture. Proceeding with caution." << std::endl;
+    } else {
+        std::wcout << L"[Injector] ✓ Architecture match validated (" << MachineTypeToString(targetArch).c_str() << ")." << std::endl;
+    }
+    // ===================================
     
     std::wstring absoluteDllPath = GetAbsoluteDllPath();
 

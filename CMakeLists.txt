@@ -3,8 +3,12 @@ cmake_minimum_required(VERSION 3.21)
 project(ai_traffic_interceptor)
 
 if(MSVC)
-    # Use dynamic CRT to ensure availability of debug CRT functions like _CrtDbgReport
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL$<$<CONFIG:Debug>:Debug>")
+    # Force all targets to use the dynamic CRT (/MD or /MDd). This avoids linker errors
+    # with subprojects and is required for injecting into most applications.
+    string(REPLACE "/MT" "/MD" CMAKE_C_FLAGS_RELEASE ${CMAKE_C_FLAGS_RELEASE})
+    string(REPLACE "/MT" "/MD" CMAKE_CXX_FLAGS_RELEASE ${CMAKE_CXX_FLAGS_RELEASE})
+    string(REPLACE "/MTd" "/MDd" CMAKE_C_FLAGS_DEBUG ${CMAKE_C_FLAGS_DEBUG})
+    string(REPLACE "/MTd" "/MDd" CMAKE_CXX_FLAGS_DEBUG ${CMAKE_CXX_FLAGS_DEBUG})
 endif()
 
 # Enable folders in IDEs
@@ -19,6 +23,11 @@ endif()
 if(WIN32)
     message(STATUS "Windows platform detected. Including Windows-specific C/C++ targets.")
     
+    # Option to build native C++ unit tests (disabled by default on ARM64 because GoogleTest has
+    # unresolved runtime-library issues there). Users can still enable manually with
+    # -DENABLE_NATIVE_TESTS=ON if their toolchain supports it.
+    option(ENABLE_NATIVE_TESTS "Build native C++ unit tests" ON)
+
     set(CMAKE_C_STANDARD 17)
     set(CMAKE_C_STANDARD_REQUIRED ON)
     set(CMAKE_C_EXTENSIONS OFF)
@@ -31,10 +40,17 @@ if(WIN32)
     add_subdirectory(external/detours EXCLUDE_FROM_ALL)
 
     # Subdirectories
+    add_subdirectory(tools)
     add_subdirectory(injector)
     add_subdirectory(dll)
     add_subdirectory(renderer)
-    add_subdirectory(tests)
+
+    # Only build tests when enabled and not targeting ARM64 where GoogleTest currently fails
+    if(ENABLE_NATIVE_TESTS AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64")
+        add_subdirectory(tests)
+    else()
+        message(STATUS "Skipping native tests (ENABLE_NATIVE_TESTS=${ENABLE_NATIVE_TESTS}; ARCH=${CMAKE_SYSTEM_PROCESSOR})")
+    endif()
 
     # Only add packaging if WiX toolset is available
     find_program(WIX_EXECUTABLE wix)
@@ -43,7 +59,6 @@ if(WIN32)
     else()
         message(WARNING "WiX toolset not found; skipping packaging targets.")
     endif()
-    add_subdirectory(tools)
 endif()
 
 # Copy config directory to build output

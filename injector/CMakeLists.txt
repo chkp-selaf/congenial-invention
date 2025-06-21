@@ -15,3 +15,9 @@ if(MSVC)
 endif()
 
 set_target_properties(ai_injector PROPERTIES FOLDER "injector")
+
+add_dependencies(ai_injector dll_diag)
+add_custom_command(TARGET ai_injector POST_BUILD
+    COMMAND $<TARGET_FILE:dll_diag> $<TARGET_FILE:ai_injector>
+    COMMENT "Diagnosing architecture of ai_injector.exe"
+    VERBATIM)
