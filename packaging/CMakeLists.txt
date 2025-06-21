@@ -9,4 +9,4 @@ add_custom_target(package_msi
 )
 
 # --- Define full dependency chain for packaging ---
-add_dependencies(package_msi ai_injector ai_hook build_proxy copy_preload build_collector) 
+add_dependencies(package_msi ai_injector ai_hook build_proxy build_collector) 

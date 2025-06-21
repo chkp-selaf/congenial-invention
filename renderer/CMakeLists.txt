@@ -1,13 +1,10 @@
 # renderer/CMakeLists.txt
 file(GLOB PRELOAD_SCRIPTS "${CMAKE_CURRENT_SOURCE_DIR}/*.js")
 
-add_custom_target(copy_preload ALL
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/renderer
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${PRELOAD_SCRIPTS}
-            ${CMAKE_BINARY_DIR}/renderer
-    COMMENT "Copying Electron preload scripts to build/renderer"
-)
+# The copy_preload target has been removed as it was causing CI build failures
+# Preload scripts are now handled differently
 
-# Make sure this runs before any component that needs it
-add_dependencies(ai_injector copy_preload) 
+# Copy preload.js to the build directory
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/preload.js 
+               ${CMAKE_BINARY_DIR}/renderer/preload.js 
+               COPYONLY) 
