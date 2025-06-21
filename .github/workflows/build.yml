@@ -31,10 +31,7 @@ jobs:
 
     - name: Build C++ components
       run: |
-        cmake --build build --config Release --target ai_injector
-        cmake --build build --config Release --target ai_hook
-        cmake --build build --config Release --target dll_diag
-        cmake --build build --config Release --target copy_config
+        cmake --build build --config Release
 
     - name: Set up .NET
       uses: actions/setup-dotnet@v4
