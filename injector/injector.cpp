@@ -81,6 +81,7 @@ static void LoadConfig() {
     wchar_t injectorPath[MAX_PATH];
     if (GetModuleFileNameW(NULL, injectorPath, MAX_PATH) == 0) {
         std::wcerr << L"[Injector] Could not get injector path. Allow-list will not be used." << std::endl;
+        std::wcerr.flush();
         return;
     }
 
@@ -89,12 +90,14 @@ static void LoadConfig() {
     
     if (!std::filesystem::exists(configPath)) {
         std::wcerr << L"[Injector] Config file not found at " << configPath << ". All processes will be allowed." << std::endl;
+        std::wcerr.flush();
         return;
     }
 
     std::ifstream configFile(configPath);
     if (!configFile.is_open()) {
         std::wcerr << L"[Injector] Could not open config file. All processes will be allowed." << std::endl;
+        std::wcerr.flush();
         return;
     }
 
@@ -107,9 +110,11 @@ static void LoadConfig() {
                 g_allowList.insert(ws);
             }
             std::wcout << L"[Injector] Loaded " << g_allowList.size() << L" processes into the allow-list." << std::endl;
+            std::wcout.flush();
         }
     } catch (const nlohmann::json::parse_error& e) {
         std::wcerr << L"[Injector] Failed to parse config file: " << e.what() << ". All processes will be allowed." << std::endl;
+        std::wcerr.flush();
         return;
     }
     
@@ -354,15 +359,23 @@ bool StartProcessAndInject(const std::wstring& cmdline, DWORD* outPid) {
     PROCESS_INFORMATION pi{};
 
     std::wcout << L"[Injector] Creating process..." << std::endl;
+    std::wcout.flush();
     if (!CreateProcessW(nullptr, const_cast<LPWSTR>(cmdline.c_str()), nullptr, nullptr,
                         FALSE, CREATE_SUSPENDED, nullptr, nullptr, &si, &pi)) {
         DWORD err = GetLastError();
         std::wcerr << L"[Injector] CreateProcess failed with error " << err << L" (" << Win32ErrorMessage(err) << L")" << std::endl;
+        std::wcerr.flush();
         LogCreateProcessDiagnostics(cmdline, err);
         return false;
     }
 
     std::wcout << L"[Injector] Process created with PID " << pi.dwProcessId << L", verifying architecture..." << std::endl;
+    std::wcout.flush();
+    
+    // Add a small delay to let the process initialize
+    std::wcout << L"[Injector] Waiting for process initialization..." << std::endl;
+    std::wcout.flush();
+    Sleep(100); // 100ms delay
     
     // === Architecture Mismatch Check ===
     WORD injectorArch = GetInjectorArchitecture();
@@ -395,6 +408,7 @@ bool StartProcessAndInject(const std::wstring& cmdline, DWORD* outPid) {
         std::wcerr << L"[Injector] ✗ CRITICAL: DLL not found at path: " << absoluteDllPath << std::endl;
         std::wcerr << L"[Injector] This path is calculated relative to the injector's location." << std::endl;
         std::wcerr << L"[Injector] Please ensure 'ai_hook.dll' exists and the build process places it correctly." << std::endl;
+        std::wcerr.flush();
         TerminateProcess(pi.hProcess, 1);
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
@@ -402,13 +416,37 @@ bool StartProcessAndInject(const std::wstring& cmdline, DWORD* outPid) {
     }
     
     std::wcout << L"[Injector] Found DLL at: " << absoluteDllPath << std::endl;
+    std::wcout.flush();
     
     char dllPathA[MAX_PATH];
     WideCharToMultiByte(CP_ACP, 0, absoluteDllPath.c_str(), -1, dllPathA, MAX_PATH, nullptr, nullptr);
     const char* dlls[] = { dllPathA };
-    if (!DetourUpdateProcessWithDll(pi.hProcess, dlls, 1)) {
-        DWORD error = GetLastError();
-        std::wcerr << L"[Injector] DetourUpdateProcessWithDll failed with error: " << error << std::endl;
+    
+    std::wcout << L"[Injector] Calling DetourUpdateProcessWithDll..." << std::endl;
+    std::wcout.flush();
+    
+    // Set last error to 0 to ensure we get the real error
+    SetLastError(0);
+    
+    BOOL detourResult = DetourUpdateProcessWithDll(pi.hProcess, dlls, 1);
+    DWORD detourError = GetLastError();
+    
+    if (!detourResult) {
+        std::wcerr << L"[Injector] DetourUpdateProcessWithDll failed with error: " << detourError << L" (" << Win32ErrorMessage(detourError) << L")" << std::endl;
+        std::wcerr.flush();
+        
+        // Check if DLL exists and is accessible
+        HMODULE testLoad = LoadLibraryExW(absoluteDllPath.c_str(), NULL, DONT_RESOLVE_DLL_REFERENCES);
+        if (testLoad) {
+            std::wcerr << L"[Injector] DLL can be loaded locally, issue might be with target process" << std::endl;
+            std::wcerr.flush();
+            FreeLibrary(testLoad);
+        } else {
+            DWORD loadError = GetLastError();
+            std::wcerr << L"[Injector] DLL cannot be loaded locally, error: " << loadError << L" (" << Win32ErrorMessage(loadError) << L")" << std::endl;
+            std::wcerr.flush();
+        }
+        
         TerminateProcess(pi.hProcess, 1);
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
@@ -416,6 +454,7 @@ bool StartProcessAndInject(const std::wstring& cmdline, DWORD* outPid) {
     }
 
     std::wcout << L"[Injector] ✓ Main process injection successful, resuming..." << std::endl;
+    std::wcout.flush();
     ResumeThread(pi.hThread);
     if (outPid) *outPid = pi.dwProcessId;
 
@@ -459,8 +498,10 @@ int wmain(int argc, wchar_t* argv[]) {
             if (std::filesystem::exists(preload_script_path)) {
                 arguments += L" --preload \"" + preload_script_path.wstring() + L"\"";
                 std::wcout << L"[Injector] Using preload script: " << preload_script_path.wstring() << std::endl;
+                std::wcout.flush();
             } else {
                 std::wcerr << L"[Injector] Preload script not found at: " << preload_script_path.wstring() << std::endl;
+                std::wcerr.flush();
             }
         }
     }
@@ -476,6 +517,7 @@ int wmain(int argc, wchar_t* argv[]) {
     std::wstring final_cmdline = L"\"" + executable_path + L"\"" + arguments;
 
     std::wcout << L"[Injector] Launching: " << final_cmdline << std::endl;
+    std::wcout.flush();
 #ifdef _DEBUG
     std::wcout << L"[Injector] (debug) Calling CreateProcessW..." << std::endl;
 #endif
@@ -483,6 +525,7 @@ int wmain(int argc, wchar_t* argv[]) {
     DWORD mainPid = 0;
     if (!StartProcessAndInject(final_cmdline, &mainPid)) {
         std::wcerr << L"[Injector] ✗ Failed to start and inject into the main process." << std::endl;
+        std::wcerr.flush();
         return 1;
     }
 

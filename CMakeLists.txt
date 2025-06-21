@@ -52,6 +52,14 @@ if(WIN32)
         message(STATUS "Skipping native tests (ENABLE_NATIVE_TESTS=${ENABLE_NATIVE_TESTS}; ARCH=${CMAKE_SYSTEM_PROCESSOR})")
     endif()
 
+    # Always build ARM64 injection test
+    if(CMAKE_GENERATOR_PLATFORM MATCHES "ARM64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64")
+        add_executable(test_arm64_injection tests/test_arm64_injection.cpp)
+        target_link_libraries(test_arm64_injection PRIVATE detours)
+        target_compile_features(test_arm64_injection PRIVATE cxx_std_17)
+        set_target_properties(test_arm64_injection PROPERTIES FOLDER "tests")
+    endif()
+
     # Only add packaging if WiX toolset is available
     find_program(WIX_EXECUTABLE wix)
     if(WIX_EXECUTABLE)

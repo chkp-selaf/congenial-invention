@@ -581,10 +581,25 @@ BOOL APIENTRY DllMain(HMODULE hModule,
 
     switch (ul_reason_for_call) {
         case DLL_PROCESS_ATTACH:
-            EtwRegister();
-            EtwTraceMessage(L"ai_hook.dll attached.");
-            PipeClientInit();
-            InstallHooks();
+            __try {
+                DisableThreadLibraryCalls(hModule);
+                
+                // Delay initialization to avoid issues with early process startup
+                // Some processes may not have all their dependencies loaded yet
+                Sleep(100);
+                
+                EtwRegister();
+                EtwTraceMessage(L"ai_hook.dll loaded into process.");
+                
+                // Initialize pipe client
+                PipeClientInit();
+                
+                // Install hooks
+                InstallHooks();
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                // Log but don't fail DLL load
+                OutputDebugStringW(L"[AI-Hook] Exception in DllMain, continuing without full initialization.");
+            }
             break;
         case DLL_PROCESS_DETACH:
             EtwTraceMessage(L"ai_hook.dll detaching.");

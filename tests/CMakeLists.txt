@@ -24,3 +24,9 @@ include(GoogleTest)
 gtest_discover_tests(unit_tests)
 
 set_target_properties(unit_tests PROPERTIES FOLDER "tests")
+
+# ARM64 injection test
+add_executable(test_arm64_injection test_arm64_injection.cpp)
+target_link_libraries(test_arm64_injection PRIVATE detours)
+target_compile_features(test_arm64_injection PRIVATE cxx_std_17)
+set_target_properties(test_arm64_injection PROPERTIES FOLDER "tests")
