@@ -11,6 +11,7 @@
 
         <Feature Id="ProductFeature" Title="AI Traffic Interceptor" Level="1">
             <ComponentGroupRef Id="ProductComponents" />
+            <ComponentRef Id="ConfigComponent" />
         </Feature>
 
         <StandardDirectory Id="ProgramFiles64Folder">
