@@ -2,6 +2,15 @@ cmake_minimum_required(VERSION 3.21)
 
 project(ai_traffic_interceptor)
 
+# ---------------------------------------------------------------------------
+# Compatibility shim: legacy 'copy_preload' target
+# Some subprojects/dependencies may still reference this target. Define it as
+# a no-op so the build graph resolves even if no longer used. Remove once all
+# references have been cleaned up.
+if(NOT TARGET copy_preload)
+    add_custom_target(copy_preload)
+endif()
+
 if(MSVC)
     # Force all targets to use the dynamic CRT (/MD or /MDd). This avoids linker errors
     # with subprojects and is required for injecting into most applications.
@@ -112,12 +121,3 @@ add_custom_target(build_proxy
 )
 
 add_dependencies(build_proxy build_collector)
-
-# ---------------------------------------------------------------------------
-# Compatibility shim: legacy 'copy_preload' target
-# Some subprojects/dependencies may still reference this target. Define it as
-# a no-op so the build graph resolves even if no longer used. Remove once all
-# references have been cleaned up.
-if(NOT TARGET copy_preload)
-    add_custom_target(copy_preload)
-endif()
