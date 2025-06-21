@@ -29,14 +29,14 @@ jobs:
         dir renderer
         cmake --build build --config Release --target help
 
-    - name: Build C++ components
-      run: |
-        cmake --build build --config Release
-
     - name: Set up .NET
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: '8.0.x'
+
+    - name: Build C++ components
+      run: |
+        cmake --build build --config Release
 
     - name: Build C# Collector
       run: |
