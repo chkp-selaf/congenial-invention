@@ -23,13 +23,18 @@ jobs:
       run: |
         cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DENABLE_NATIVE_TESTS=OFF
 
+    - name: List build directory
+      run: |
+        dir
+        dir renderer
+        cmake --build build --config Release --target help
+
     - name: Build C++ components
       run: |
         cmake --build build --config Release --target ai_injector
         cmake --build build --config Release --target ai_hook
         cmake --build build --config Release --target dll_diag
         cmake --build build --config Release --target copy_config
-        cmake --build build --config Release --target copy_preload
 
     - name: Set up .NET
       uses: actions/setup-dotnet@v4
