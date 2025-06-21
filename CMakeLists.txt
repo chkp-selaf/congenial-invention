@@ -46,7 +46,7 @@ if(WIN32)
     set(CMAKE_CXX_EXTENSIONS OFF)
 
     # Dependencies
-    add_subdirectory(external/detours EXCLUDE_FROM_ALL)
+    add_subdirectory(external/detours-cmake EXCLUDE_FROM_ALL)
 
     # Subdirectories
     add_subdirectory(tools)
