@@ -27,7 +27,6 @@ jobs:
       run: |
         dir
         dir renderer
-        cmake --build build --config Release --target help
 
     - name: Set up .NET
       uses: actions/setup-dotnet@v4
