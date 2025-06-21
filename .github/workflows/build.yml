@@ -31,7 +31,8 @@ jobs:
     - name: List build directory
       run: |
         dir
-        dir renderer
+        dir build
+        dir build\renderer
 
     - name: Build C++ components
       run: |
