@@ -1,0 +1,5 @@
+if(EXISTS "C:/ckp/src/ai-agent/congenial-invention/build_arm64/tests/unit_tests[1]_tests.cmake")
+  include("C:/ckp/src/ai-agent/congenial-invention/build_arm64/tests/unit_tests[1]_tests.cmake")
+else()
+  add_test(unit_tests_NOT_BUILT unit_tests_NOT_BUILT)
+endif()

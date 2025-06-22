@@ -63,10 +63,12 @@ if(WIN32)
 
     # Always build ARM64 injection test
     if(CMAKE_GENERATOR_PLATFORM MATCHES "ARM64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64")
-        add_executable(test_arm64_injection tests/test_arm64_injection.cpp)
-        target_link_libraries(test_arm64_injection PRIVATE detours)
-        target_compile_features(test_arm64_injection PRIVATE cxx_std_17)
-        set_target_properties(test_arm64_injection PROPERTIES FOLDER "tests")
+        if(NOT TARGET test_arm64_injection)
+            add_executable(test_arm64_injection tests/test_arm64_injection.cpp)
+            target_link_libraries(test_arm64_injection PRIVATE detours)
+            target_compile_features(test_arm64_injection PRIVATE cxx_std_17)
+            set_target_properties(test_arm64_injection PROPERTIES FOLDER "tests")
+        endif()
     endif()
 
     # Only add packaging if WiX toolset is available

@@ -1,0 +1,12 @@
+{
+  "process_allow_list": [
+    "python.exe",
+    "node.exe",
+    "Code.exe",
+    "powershell.exe",
+    "pwsh.exe",
+    "cmd.exe",
+    "curl.exe",
+    "rundll32.exe"
+  ]
+} 

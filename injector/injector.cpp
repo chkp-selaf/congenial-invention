@@ -16,6 +16,25 @@
 #include <regex>
 #pragma comment(lib, "shlwapi.lib")
 
+// Simple logging for injector
+static void LogInjector(const std::wstring& level, const std::wstring& message) {
+    auto now = std::chrono::system_clock::now();
+    auto time_t = std::chrono::system_clock::to_time_t(now);
+    
+    wchar_t timeBuffer[100];
+    struct tm timeinfo;
+    localtime_s(&timeinfo, &time_t);
+    wcsftime(timeBuffer, sizeof(timeBuffer) / sizeof(wchar_t), L"%Y-%m-%d %H:%M:%S", &timeinfo);
+    
+    std::wcout << L"[" << timeBuffer << L"] [" << level << L"] " << message << std::endl;
+    std::wcout.flush();
+    
+    // Also log to debug output
+    std::wstringstream debugMsg;
+    debugMsg << L"[AI-Injector] [" << level << L"] " << message;
+    OutputDebugStringW(debugMsg.str().c_str());
+}
+
 // --- Globals for Configuration ---
 static std::unordered_set<std::wstring> g_allowList;
 static bool g_configLoaded = false;
@@ -196,30 +215,47 @@ static bool InjectIntoProcess(DWORD pid, const wchar_t* dllPath) {
     // --- Allow-list Check ---
     if (g_configLoaded && !g_allowList.empty()) {
         if (g_allowList.find(processName) == g_allowList.end()) {
+            LogInjector(L"INFO", L"Skipping non-allowed process: " + processName);
             std::wcout << L"[Injector] Skipping non-allowed process: " << processName << std::endl;
             return false; // Not an error, just skipping
         }
     }
+    
+    LogInjector(L"INFO", L"Attempting injection into PID " + std::to_wstring(pid) + L" (" + processName + L")");
+    LogInjector(L"DEBUG", L"Using DLL: " + std::wstring(dllPath));
     
     std::wcout << L"[Injector] Attempting injection into PID " << pid << L" (" << processName << L")" << std::endl;
     std::wcout << L"[Injector] Using DLL: " << dllPath << std::endl;
     
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
     if (!hProcess) {
-        std::wcerr << L"[Injector] Failed to open process " << pid << L": " << GetLastError() << std::endl;
+        DWORD error = GetLastError();
+        LogInjector(L"ERROR", L"Failed to open process " + std::to_wstring(pid) + L": " + std::to_wstring(error));
+        std::wcerr << L"[Injector] Failed to open process " << pid << L": " << error << std::endl;
         return false;
+    }
+    
+    // Check process architecture
+    WORD targetArch = GetProcessArchitecture(hProcess);
+    if (targetArch != 0) {
+        LogInjector(L"DEBUG", L"Target process architecture: " + std::wstring(MachineTypeToString(targetArch).begin(), MachineTypeToString(targetArch).end()));
     }
 
     char dllPathA[MAX_PATH];
     WideCharToMultiByte(CP_ACP, 0, dllPath, -1, dllPathA, MAX_PATH, nullptr, nullptr);
     const char* dlls[] = { dllPathA };
+    
+    LogInjector(L"DEBUG", L"Calling DetourUpdateProcessWithDll...");
     BOOL ok = DetourUpdateProcessWithDll(hProcess, dlls, 1);
+    DWORD detourError = GetLastError();
     CloseHandle(hProcess);
     
     if (ok) {
+        LogInjector(L"INFO", L"✓ Successfully injected into PID " + std::to_wstring(pid) + L" (" + processName + L")");
         std::wcout << L"[Injector] ✓ Successfully injected into PID " << pid << L" (" << processName << L")" << std::endl;
     } else {
-        std::wcerr << L"[Injector] ✗ Failed to inject into PID " << pid << L" (" << processName << L"): " << GetLastError() << std::endl;
+        LogInjector(L"ERROR", L"✗ Failed to inject into PID " + std::to_wstring(pid) + L" (" + processName + L"): " + std::to_wstring(detourError));
+        std::wcerr << L"[Injector] ✗ Failed to inject into PID " << pid << L" (" << processName << L"): " << detourError << std::endl;
     }
     
     return ok == TRUE;
@@ -464,7 +500,12 @@ bool StartProcessAndInject(const std::wstring& cmdline, DWORD* outPid) {
 }
 
 int wmain(int argc, wchar_t* argv[]) {
+    LogInjector(L"INFO", L"=== AI Traffic Injector Starting ===");
+    LogInjector(L"INFO", L"Version: 1.0.0");
+    LogInjector(L"DEBUG", L"Command line args: " + std::to_wstring(argc));
+    
     if (argc < 2) {
+        LogInjector(L"ERROR", L"Invalid arguments");
         std::wcerr << L"Usage: ai_injector [--with-children] <command line>" << std::endl;
         return 1;
     }
@@ -476,7 +517,9 @@ int wmain(int argc, wchar_t* argv[]) {
     if (std::wstring_view(argv[1]) == L"--with-children") {
         withChildren = true;
         firstCmdArg = 2;
+        LogInjector(L"INFO", L"Child process monitoring enabled");
         if (argc < 3) {
+            LogInjector(L"ERROR", L"Expected command line after --with-children");
             std::wcerr << L"Expected command line after --with-children" << std::endl;
             return 1;
         }

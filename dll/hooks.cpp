@@ -2,6 +2,7 @@
 #include "pipe_client.h"
 #include "pattern_scan.h"
 #include "openssl_types.h"
+#include "logging.h"  // Add new logging header
 #include <windows.h>
 #include <winhttp.h>
 #include <detours.h>
@@ -142,6 +143,8 @@ void CreateAndSendEvent(ApiType apiType, const std::wstring& url, const void* da
 
 // --- WinHTTP Detours ---
 BOOL WINAPI Mine_WinHttpSendRequest(HINTERNET hRequest, LPCWSTR h, DWORD hl, LPVOID o, DWORD ol, DWORD tl, DWORD_PTR c) {
+    LOG_TRACE_F(L"WinHTTP", L"WinHttpSendRequest called - hRequest: 0x%p, dataLength: %d", hRequest, ol);
+    
     try {
         if (o && ol > 0) {
             DWORD dwUrlLength = 0;
@@ -149,16 +152,28 @@ BOOL WINAPI Mine_WinHttpSendRequest(HINTERNET hRequest, LPCWSTR h, DWORD hl, LPV
             if (dwUrlLength > 0) {
                 std::vector<wchar_t> urlBuffer(dwUrlLength / sizeof(wchar_t));
                 WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_URL, WINHTTP_HEADER_NAME_BY_INDEX, urlBuffer.data(), &dwUrlLength, WINHTTP_NO_HEADER_INDEX);
-                CreateAndSendEvent(ApiType::WinHttpSend, std::wstring(urlBuffer.begin(), urlBuffer.end() - 1), o, ol);
+                std::wstring url(urlBuffer.begin(), urlBuffer.end() - 1);
+                
+                LOG_INFO_F(L"WinHTTP", L"Intercepted WinHttpSendRequest - URL: %s, Size: %d bytes", url.c_str(), ol);
+                LOG_DATA(LogLevel::DEBUG, L"WinHTTP", L"Request data", o, ol);
+                
+                CreateAndSendEvent(ApiType::WinHttpSend, url, o, ol);
+            } else {
+                LOG_WARN(L"WinHTTP", L"Failed to get URL from request handle");
             }
+        } else {
+            LOG_TRACE(L"WinHTTP", L"WinHttpSendRequest called with no data");
         }
     } catch (...) {
+        LOG_ERROR(L"WinHTTP", L"Unhandled exception in Mine_WinHttpSendRequest");
         EtwTraceMessage(L"Unhandled exception in Mine_WinHttpSendRequest. Passing through.");
     }
     return Real_WinHttpSendRequest(hRequest, h, hl, o, ol, tl, c);
 }
 
 BOOL WINAPI Mine_WinHttpReadData(HINTERNET hRequest, LPVOID b, DWORD br, LPDWORD brr) {
+    LOG_TRACE_F(L"WinHTTP", L"WinHttpReadData called - hRequest: 0x%p, bufferSize: %d", hRequest, br);
+    
     BOOL result = Real_WinHttpReadData(hRequest, b, br, brr);
     try {
         if (result && brr && *brr > 0) {
@@ -167,10 +182,20 @@ BOOL WINAPI Mine_WinHttpReadData(HINTERNET hRequest, LPVOID b, DWORD br, LPDWORD
             if (dwUrlLength > 0) {
                 std::vector<wchar_t> urlBuffer(dwUrlLength / sizeof(wchar_t));
                 WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_URL, WINHTTP_HEADER_NAME_BY_INDEX, urlBuffer.data(), &dwUrlLength, WINHTTP_NO_HEADER_INDEX);
-                CreateAndSendEvent(ApiType::WinHttpRead, std::wstring(urlBuffer.begin(), urlBuffer.end() - 1), b, *brr);
+                std::wstring url(urlBuffer.begin(), urlBuffer.end() - 1);
+                
+                LOG_INFO_F(L"WinHTTP", L"Intercepted WinHttpReadData - URL: %s, Read: %d bytes", url.c_str(), *brr);
+                LOG_DATA(LogLevel::DEBUG, L"WinHTTP", L"Response data", b, *brr);
+                
+                CreateAndSendEvent(ApiType::WinHttpRead, url, b, *brr);
+            } else {
+                LOG_WARN(L"WinHTTP", L"Failed to get URL from request handle");
             }
+        } else if (!result) {
+            LOG_DEBUG_F(L"WinHTTP", L"WinHttpReadData failed or returned no data (result: %d)", result);
         }
     } catch (...) {
+        LOG_ERROR(L"WinHTTP", L"Unhandled exception in Mine_WinHttpReadData");
         EtwTraceMessage(L"Unhandled exception in Mine_WinHttpReadData. Passing through.");
     }
     return result;
@@ -202,6 +227,8 @@ DWORD WINAPI Mine_WinHttpWebSocketReceive(HINTERNET h, PVOID b, DWORD l, LPDWORD
 
 // --- BoringSSL Detour ---
 int __cdecl Mine_SSL_write(SSL* ssl, const void* buf, int num) {
+    LOG_TRACE_F(L"SSL", L"SSL_write called - ssl: 0x%p, dataLen: %d", ssl, num);
+    
     try {
         if (Real_SSL_get_servername && ssl) {
             const char* servername = Real_SSL_get_servername(ssl, 0); // 0 for TLSEXT_NAMETYPE_host_name
@@ -210,10 +237,19 @@ int __cdecl Mine_SSL_write(SSL* ssl, const void* buf, int num) {
                 int size_needed = MultiByteToWideChar(CP_UTF8, 0, servername, (int)strlen(servername), NULL, 0);
                 std::wstring wServername(size_needed, 0);
                 MultiByteToWideChar(CP_UTF8, 0, servername, (int)strlen(servername), &wServername[0], size_needed);
+                
+                LOG_INFO_F(L"SSL", L"Intercepted SSL_write - Server: %s, Size: %d bytes", wServername.c_str(), num);
+                LOG_DATA(LogLevel::DEBUG, L"SSL", L"SSL write data", buf, num);
+                
                 CreateAndSendEvent(ApiType::SslWrite, wServername, buf, num);
+            } else {
+                LOG_DEBUG(L"SSL", L"SSL_write called but no servername available");
             }
+        } else {
+            LOG_WARN_F(L"SSL", L"SSL_write called but Real_SSL_get_servername is null (0x%p) or ssl is null", Real_SSL_get_servername);
         }
     } catch (...) {
+        LOG_ERROR(L"SSL", L"Unhandled exception in Mine_SSL_write");
         EtwTraceMessage(L"Unhandled exception in Mine_SSL_write. Passing through.");
     }
     return Real_SSL_write(ssl, buf, num);
@@ -221,16 +257,30 @@ int __cdecl Mine_SSL_write(SSL* ssl, const void* buf, int num) {
 
 // --- BoringSSL Detour for SSL_read ---
 int __cdecl Mine_SSL_read(SSL* ssl, void* buf, int num) {
+    LOG_TRACE_F(L"SSL", L"SSL_read called - ssl: 0x%p, bufferSize: %d", ssl, num);
+    
     int bytes_read = Real_SSL_read(ssl, buf, num);
     try {
         if (bytes_read > 0 && Real_SSL_get_servername && ssl) {
             const char* servername = Real_SSL_get_servername(ssl, 0); // 0 for TLSEXT_NAMETYPE_host_name
             if (servername) {
-                std::wstring wServername = StringToWstring(std::string(servername));
+                // Convert char* to wstring
+                int size_needed = MultiByteToWideChar(CP_UTF8, 0, servername, (int)strlen(servername), NULL, 0);
+                std::wstring wServername(size_needed, 0);
+                MultiByteToWideChar(CP_UTF8, 0, servername, (int)strlen(servername), &wServername[0], size_needed);
+                
+                LOG_INFO_F(L"SSL", L"Intercepted SSL_read - Server: %s, Read: %d bytes", wServername.c_str(), bytes_read);
+                LOG_DATA(LogLevel::DEBUG, L"SSL", L"SSL read data", buf, bytes_read);
+                
                 CreateAndSendEvent(ApiType::SslRead, wServername, buf, bytes_read);
+            } else {
+                LOG_DEBUG(L"SSL", L"SSL_read returned data but no servername available");
             }
+        } else if (bytes_read <= 0) {
+            LOG_TRACE_F(L"SSL", L"SSL_read returned %d (no data or error)", bytes_read);
         }
     } catch (...) {
+        LOG_ERROR(L"SSL", L"Unhandled exception in Mine_SSL_read");
         EtwTraceMessage(L"Unhandled exception in Mine_SSL_read. Passing through.");
     }
     return bytes_read;
@@ -247,7 +297,10 @@ void MyKeylogCallback(const SSL *ssl, const char *line) {
             if (ssl && Real_SSL_get_servername) {
                 const char* server_name_cstr = Real_SSL_get_servername(ssl, 0); // 0 for TLSEXT_NAMETYPE_host_name
                 if (server_name_cstr) {
-                    server_name_wstr = StringToWstring(std::string(server_name_cstr));
+                    // Convert char* to wstring
+                    int size_needed = MultiByteToWideChar(CP_UTF8, 0, server_name_cstr, (int)strlen(server_name_cstr), NULL, 0);
+                    server_name_wstr.resize(size_needed);
+                    MultiByteToWideChar(CP_UTF8, 0, server_name_cstr, (int)strlen(server_name_cstr), &server_name_wstr[0], size_needed);
                 }
             }
             if (server_name_wstr.empty()) {
@@ -354,9 +407,29 @@ BOOL WINAPI Mine_PostMessageW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
     return Real_PostMessageW(hWnd, Msg, wParam, lParam);
 }
 
+// Helper to get process name
+std::wstring GetProcessName(DWORD pid) {
+    wchar_t processPath[MAX_PATH] = L"";
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (hProcess) {
+        DWORD size = MAX_PATH;
+        QueryFullProcessImageNameW(hProcess, 0, processPath, &size);
+        CloseHandle(hProcess);
+    }
+    
+    std::wstring fullPath(processPath);
+    size_t lastSlash = fullPath.find_last_of(L"\\");
+    if (lastSlash != std::wstring::npos) {
+        return fullPath.substr(lastSlash + 1);
+    }
+    return fullPath.empty() ? L"<unknown>" : fullPath;
+}
+
 // --- Hook Installation ---
 // Helper function to attempt to get SSL function addresses from common module names
 void TryGetSslFunctionsFromExports() {
+    LOG_INFO(L"SSL", L"Attempting to find SSL functions from module exports");
+    
     const wchar_t* commonSslModuleNames[] = {
         L"node.dll",           // For VSCode/Electron's bundled Node.js/BoringSSL
         L"libssl-3-x64.dll",
@@ -370,30 +443,53 @@ void TryGetSslFunctionsFromExports() {
     for (const wchar_t* moduleName : commonSslModuleNames) {
         HMODULE hMod = GetModuleHandleW(moduleName);
         if (!hMod) {
+            LOG_TRACE_F(L"SSL", L"Module %s not loaded", moduleName);
             // Try LoadLibrary if not already loaded, though SSL libs are usually pre-loaded by apps using them
             // hMod = LoadLibraryW(moduleName);
             // if (hMod) { /* remember to FreeLibrary if we loaded it and aren't using it */ }
         }
 
         if (hMod) {
+            LOG_DEBUG_F(L"SSL", L"Checking module for SSL exports: %s", moduleName);
             EtwTraceMessage((std::wstring(L"Checking module for SSL exports: ") + moduleName).c_str());
-            if (!Real_SSL_write) Real_SSL_write = (SSL_write_t)GetProcAddress(hMod, "SSL_write");
-            if (!Real_SSL_read) Real_SSL_read = (SSL_read_t)GetProcAddress(hMod, "SSL_read");
-            if (!Real_SSL_get_servername) Real_SSL_get_servername = (SSL_get_servername_t)GetProcAddress(hMod, "SSL_get_servername");
-            if (!Real_SSL_CTX_set_keylog_callback) Real_SSL_CTX_set_keylog_callback = (SSL_CTX_set_keylog_callback_t)GetProcAddress(hMod, "SSL_CTX_set_keylog_callback");
-            if (!Real_SSL_new) Real_SSL_new = (SSL_new_t)GetProcAddress(hMod, "SSL_new");
+            
+            if (!Real_SSL_write) {
+                Real_SSL_write = (SSL_write_t)GetProcAddress(hMod, "SSL_write");
+                if (Real_SSL_write) LOG_INFO_F(L"SSL", L"Found SSL_write in %s", moduleName);
+            }
+            if (!Real_SSL_read) {
+                Real_SSL_read = (SSL_read_t)GetProcAddress(hMod, "SSL_read");
+                if (Real_SSL_read) LOG_INFO_F(L"SSL", L"Found SSL_read in %s", moduleName);
+            }
+            if (!Real_SSL_get_servername) {
+                Real_SSL_get_servername = (SSL_get_servername_t)GetProcAddress(hMod, "SSL_get_servername");
+                if (Real_SSL_get_servername) LOG_INFO_F(L"SSL", L"Found SSL_get_servername in %s", moduleName);
+            }
+            if (!Real_SSL_CTX_set_keylog_callback) {
+                Real_SSL_CTX_set_keylog_callback = (SSL_CTX_set_keylog_callback_t)GetProcAddress(hMod, "SSL_CTX_set_keylog_callback");
+                if (Real_SSL_CTX_set_keylog_callback) LOG_INFO_F(L"SSL", L"Found SSL_CTX_set_keylog_callback in %s", moduleName);
+            }
+            if (!Real_SSL_new) {
+                Real_SSL_new = (SSL_new_t)GetProcAddress(hMod, "SSL_new");
+                if (Real_SSL_new) LOG_INFO_F(L"SSL", L"Found SSL_new in %s", moduleName);
+            }
             
             // If we found all essential functions, we can stop searching modules
             // SSL_get_servername is helpful but not strictly essential for keylogging if SSL_CTX_set_keylog_callback and SSL_new are found.
             if (Real_SSL_write && Real_SSL_read && Real_SSL_CTX_set_keylog_callback && Real_SSL_new && Real_SSL_get_servername) {
+                LOG_INFO(L"SSL", L"Found all SSL functions via GetProcAddress");
                 EtwTraceMessage(L"Found all SSL functions via GetProcAddress.");
                 return;
             }
         }
     }
+    
+    LOG_WARN(L"SSL", L"Not all SSL functions found via exports");
 }
 
 void InstallSslHooks() {
+    LOG_INFO(L"SSL", L"Installing SSL hooks");
+    
     // First, try to get functions from exports of common SSL libraries
     TryGetSslFunctionsFromExports();
 
@@ -403,6 +499,7 @@ void InstallSslHooks() {
     if (!hTargetModuleForScanning) {
          // If chrome.dll isn't there, and we haven't found functions by export, SSL hooks won't work.
         if (!Real_SSL_write && !Real_SSL_read) { // Check if any essential func is missing
+            LOG_WARN(L"SSL", L"Target module (e.g., chrome.dll) not found, and SSL functions not found by export. Skipping SSL pattern scan.");
             EtwTraceMessage(L"Target module (e.g., chrome.dll) not found, and SSL functions not found by export. Skipping SSL pattern scan.");
             return;
         }
@@ -413,6 +510,7 @@ void InstallSslHooks() {
     bool needsPatternScan = (!Real_SSL_write || !Real_SSL_read || !Real_SSL_get_servername || !Real_SSL_CTX_set_keylog_callback || !Real_SSL_new) && hTargetModuleForScanning;
 
     if (needsPatternScan) {
+        LOG_INFO(L"SSL", L"Attempting SSL function pattern scanning in target module (e.g. chrome.dll)");
         EtwTraceMessage(L"Attempting SSL function pattern scanning in target module (e.g. chrome.dll).");
     
     // Validated patterns for x64 versions of BoringSSL found in recent Chrome/Electron.
@@ -505,111 +603,110 @@ void InstallSslHooks() {
 }
 
 void InstallHooks() {
-    EtwTraceMessage(L"Attaching hooks...");
+    LOG_INFO(L"Hooks", L"Beginning hook installation");
+    LOG_INFO_F(L"Hooks", L"Process: %s (PID: %d)", GetProcessName(GetCurrentProcessId()).c_str(), GetCurrentProcessId());
+    
+    EtwRegister();
+    LOG_DEBUG(L"Hooks", L"ETW registered");
+    
+    PipeClientInit();
+    LOG_DEBUG(L"Hooks", L"Pipe client initialized");
+
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
-
-    // WinHTTP
+    
+    LOG_INFO(L"Hooks", L"Installing WinHTTP hooks");
     DetourAttach(&(PVOID&)Real_WinHttpSendRequest, Mine_WinHttpSendRequest);
     DetourAttach(&(PVOID&)Real_WinHttpReadData, Mine_WinHttpReadData);
     DetourAttach(&(PVOID&)Real_WinHttpWebSocketSend, Mine_WinHttpWebSocketSend);
     DetourAttach(&(PVOID&)Real_WinHttpWebSocketReceive, Mine_WinHttpWebSocketReceive);
-
-    // BoringSSL / OpenSSL
-    InstallSslHooks(); // This function now tries GetProcAddress then pattern scanning.
-
-    // Schannel
+    
+    LOG_INFO(L"Hooks", L"Installing Schannel hooks");
     DetourAttach(&(PVOID&)Real_EncryptMessage, Mine_EncryptMessage);
-    EtwTraceMessage(L"Attached to EncryptMessage.");
     DetourAttach(&(PVOID&)Real_DecryptMessage, Mine_DecryptMessage);
-    EtwTraceMessage(L"Attached to DecryptMessage.");
     DetourAttach(&(PVOID&)Real_AcquireCredentialsHandleW, Mine_AcquireCredentialsHandleW);
-    EtwTraceMessage(L"Attached to AcquireCredentialsHandleW.");
-
-    // Electron preload hook for PostMessageW
+    
+    LOG_INFO(L"Hooks", L"Installing PostMessage hook for Electron");
     DetourAttach(&(PVOID&)Real_PostMessageW, Mine_PostMessageW);
-    EtwTraceMessage(L"Attached to PostMessageW for Electron preload.");
-
-    DetourTransactionCommit();
-    EtwTraceMessage(L"Hooks committed.");
+    
+    InstallSslHooks();
+    
+    LONG error = DetourTransactionCommit();
+    if (error != NO_ERROR) {
+        LOG_ERROR_F(L"Hooks", L"DetourTransactionCommit failed with error: %ld", error);
+        EtwTraceMessage(L"DetourTransactionCommit failed!");
+    } else {
+        LOG_INFO(L"Hooks", L"All hooks installed successfully");
+        EtwTraceMessage(L"All hooks installed successfully.");
+    }
 }
 
 void RemoveHooks() {
-    EtwTraceMessage(L"Detaching hooks...");
+    LOG_INFO(L"Hooks", L"Beginning hook removal");
+    
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
-
+    
+    LOG_DEBUG(L"Hooks", L"Detaching WinHTTP hooks");
     DetourDetach(&(PVOID&)Real_WinHttpSendRequest, Mine_WinHttpSendRequest);
     DetourDetach(&(PVOID&)Real_WinHttpReadData, Mine_WinHttpReadData);
     DetourDetach(&(PVOID&)Real_WinHttpWebSocketSend, Mine_WinHttpWebSocketSend);
     DetourDetach(&(PVOID&)Real_WinHttpWebSocketReceive, Mine_WinHttpWebSocketReceive);
-    // Detach SSL functions if they were hooked
-    if (Real_SSL_write) {
-        DetourDetach(&(PVOID&)Real_SSL_write, Mine_SSL_write);
-        EtwTraceMessage(L"Detached SSL_write.");
-    }
-    if (Real_SSL_read) {
-        DetourDetach(&(PVOID&)Real_SSL_read, Mine_SSL_read);
-        EtwTraceMessage(L"Detached SSL_read.");
-    }
-    if (Real_SSL_new) { // Detach SSL_new if it was hooked
-        DetourDetach(&(PVOID&)Real_SSL_new, Mine_SSL_new);
-        EtwTraceMessage(L"Detached SSL_new.");
-    }
-    // Real_SSL_get_servername and Real_SSL_CTX_set_keylog_callback are not hooked, so no detach needed.
-    g_processed_ssl_contexts.clear(); // Clear the set of processed contexts
-
-    // Schannel
+    
+    LOG_DEBUG(L"Hooks", L"Detaching Schannel hooks");
     DetourDetach(&(PVOID&)Real_EncryptMessage, Mine_EncryptMessage);
     DetourDetach(&(PVOID&)Real_DecryptMessage, Mine_DecryptMessage);
     DetourDetach(&(PVOID&)Real_AcquireCredentialsHandleW, Mine_AcquireCredentialsHandleW);
-
-    // Detach from PostMessageW
+    
+    LOG_DEBUG(L"Hooks", L"Detaching PostMessage hook");
     DetourDetach(&(PVOID&)Real_PostMessageW, Mine_PostMessageW);
-
-    DetourTransactionCommit();
-    EtwTraceMessage(L"Hooks detached.");
+    
+    if (Real_SSL_write) {
+        LOG_DEBUG(L"Hooks", L"Detaching SSL_write");
+        DetourDetach(&(PVOID&)Real_SSL_write, Mine_SSL_write);
+    }
+    if (Real_SSL_read) {
+        LOG_DEBUG(L"Hooks", L"Detaching SSL_read");
+        DetourDetach(&(PVOID&)Real_SSL_read, Mine_SSL_read);
+    }
+    if (Real_SSL_new) {
+        LOG_DEBUG(L"Hooks", L"Detaching SSL_new");
+        DetourDetach(&(PVOID&)Real_SSL_new, Mine_SSL_new);
+    }
+    
+    LONG error = DetourTransactionCommit();
+    if (error != NO_ERROR) {
+        LOG_ERROR_F(L"Hooks", L"DetourTransactionCommit failed during removal with error: %ld", error);
+    } else {
+        LOG_INFO(L"Hooks", L"All hooks removed successfully");
+    }
+    
+    PipeClientShutdown();
+    LOG_DEBUG(L"Hooks", L"Pipe client shut down");
+    
+    EtwUnregister();
+    LOG_DEBUG(L"Hooks", L"ETW unregistered");
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule,
                        DWORD  ul_reason_for_call,
                        LPVOID lpReserved
 ) {
-    if (DetourIsHelperProcess()) {
-        return TRUE;
-    }
-
-    switch (ul_reason_for_call) {
-        case DLL_PROCESS_ATTACH:
-            __try {
-                DisableThreadLibraryCalls(hModule);
-                
-                // Delay initialization to avoid issues with early process startup
-                // Some processes may not have all their dependencies loaded yet
-                Sleep(100);
-                
-                EtwRegister();
-                EtwTraceMessage(L"ai_hook.dll loaded into process.");
-                
-                // Initialize pipe client
-                PipeClientInit();
-                
-                // Install hooks
-                InstallHooks();
-            } __except(EXCEPTION_EXECUTE_HANDLER) {
-                // Log but don't fail DLL load
-                OutputDebugStringW(L"[AI-Hook] Exception in DllMain, continuing without full initialization.");
-            }
-            break;
-        case DLL_PROCESS_DETACH:
-            EtwTraceMessage(L"ai_hook.dll detaching.");
-            RemoveHooks();
-            PipeClientShutdown();
-            EtwUnregister();
-            break;
-        case DLL_THREAD_ATTACH:
-        case DLL_THREAD_DETACH:
-            break;
+    switch (ul_reason_for_call)
+    {
+    case DLL_PROCESS_ATTACH:
+        LOG_INFO(L"DllMain", L"=== AI Hook DLL Attached ===");
+        LOG_INFO_F(L"DllMain", L"Module handle: 0x%p", hModule);
+        LOG_INFO_F(L"DllMain", L"Log file: %s", Logger::GetInstance()->GetLogFilePath().c_str());
+        
+        DisableThreadLibraryCalls(hModule);
+        InstallHooks();
+        break;
+        
+    case DLL_PROCESS_DETACH:
+        LOG_INFO(L"DllMain", L"=== AI Hook DLL Detaching ===");
+        RemoveHooks();
+        break;
     }
     return TRUE;
 }
