@@ -1,5 +1,0 @@
-add_test([=[InitialTest.Placeholder]=]  C:/ckp/src/ai-agent/congenial-invention/build_arm64/tests/Release/unit_tests.exe [==[--gtest_filter=InitialTest.Placeholder]==] --gtest_also_run_disabled_tests)
-set_tests_properties([=[InitialTest.Placeholder]=]  PROPERTIES WORKING_DIRECTORY C:/ckp/src/ai-agent/congenial-invention/build_arm64/tests SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-add_test([=[WinHttpHookTest.MakesHttpRequest]=]  C:/ckp/src/ai-agent/congenial-invention/build_arm64/tests/Release/unit_tests.exe [==[--gtest_filter=WinHttpHookTest.MakesHttpRequest]==] --gtest_also_run_disabled_tests)
-set_tests_properties([=[WinHttpHookTest.MakesHttpRequest]=]  PROPERTIES WORKING_DIRECTORY C:/ckp/src/ai-agent/congenial-invention/build_arm64/tests SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-set(  unit_tests_TESTS InitialTest.Placeholder WinHttpHookTest.MakesHttpRequest)

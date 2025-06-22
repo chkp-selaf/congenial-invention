@@ -45,3 +45,6 @@ vs_build/
 
 # Logs
 logs/
+
+# Ignore all generated build directories
+build*/
