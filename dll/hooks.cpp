@@ -146,23 +146,45 @@ BOOL WINAPI Mine_WinHttpSendRequest(HINTERNET hRequest, LPCWSTR h, DWORD hl, LPV
     LOG_TRACE_F(L"WinHTTP", L"WinHttpSendRequest called - hRequest: 0x%p, dataLength: %d", hRequest, ol);
     
     try {
+        // Always try to capture data if present
         if (o && ol > 0) {
+            // Try to get URL - but don't fail if we can't
+            std::wstring url = L"<unknown>";
             DWORD dwUrlLength = 0;
-            WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_URL, WINHTTP_HEADER_NAME_BY_INDEX, NULL, &dwUrlLength, WINHTTP_NO_HEADER_INDEX);
-            if (dwUrlLength > 0) {
-                std::vector<wchar_t> urlBuffer(dwUrlLength / sizeof(wchar_t));
-                WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_URL, WINHTTP_HEADER_NAME_BY_INDEX, urlBuffer.data(), &dwUrlLength, WINHTTP_NO_HEADER_INDEX);
-                std::wstring url(urlBuffer.begin(), urlBuffer.end() - 1);
-                
-                LOG_INFO_F(L"WinHTTP", L"Intercepted WinHttpSendRequest - URL: %s, Size: %d bytes", url.c_str(), ol);
-                LOG_DATA(LogLevel::DEBUG, L"WinHTTP", L"Request data", o, ol);
-                
-                CreateAndSendEvent(ApiType::WinHttpSend, url, o, ol);
-            } else {
-                LOG_WARN(L"WinHTTP", L"Failed to get URL from request handle");
+            
+            // Try WINHTTP_QUERY_URI first
+            if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_URI, WINHTTP_HEADER_NAME_BY_INDEX, NULL, &dwUrlLength, WINHTTP_NO_HEADER_INDEX) || 
+                GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+                std::vector<wchar_t> urlBuffer(dwUrlLength / sizeof(wchar_t) + 1);
+                if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_URI, WINHTTP_HEADER_NAME_BY_INDEX, urlBuffer.data(), &dwUrlLength, WINHTTP_NO_HEADER_INDEX)) {
+                    url = std::wstring(urlBuffer.data());
+                    LOG_DEBUG_F(L"WinHTTP", L"Got URI: %s", url.c_str());
+                }
             }
+            
+            // If that didn't work, try to get the Host header
+            if (url == L"<unknown>") {
+                DWORD hostLength = 0;
+                if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_HOST, WINHTTP_HEADER_NAME_BY_INDEX, NULL, &hostLength, WINHTTP_NO_HEADER_INDEX) || 
+                    GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+                    std::vector<wchar_t> hostBuffer(hostLength / sizeof(wchar_t) + 1);
+                    if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_HOST, WINHTTP_HEADER_NAME_BY_INDEX, hostBuffer.data(), &hostLength, WINHTTP_NO_HEADER_INDEX)) {
+                        url = L"https://" + std::wstring(hostBuffer.data());
+                        LOG_DEBUG_F(L"WinHTTP", L"Got Host: %s", hostBuffer.data());
+                    }
+                }
+            }
+            
+            LOG_INFO_F(L"WinHTTP", L"Intercepted WinHttpSendRequest - URL: %s, Size: %d bytes", url.c_str(), ol);
+            LOG_DATA(LogLevel::DEBUG, L"WinHTTP", L"Request data", o, ol);
+            
+            CreateAndSendEvent(ApiType::WinHttpSend, url, o, ol);
         } else {
             LOG_TRACE(L"WinHTTP", L"WinHttpSendRequest called with no data");
+            
+            // Even without data, we might want to capture the request
+            std::wstring url = L"<no-data>";
+            CreateAndSendEvent(ApiType::WinHttpSend, url, nullptr, 0);
         }
     } catch (...) {
         LOG_ERROR(L"WinHTTP", L"Unhandled exception in Mine_WinHttpSendRequest");
@@ -177,20 +199,34 @@ BOOL WINAPI Mine_WinHttpReadData(HINTERNET hRequest, LPVOID b, DWORD br, LPDWORD
     BOOL result = Real_WinHttpReadData(hRequest, b, br, brr);
     try {
         if (result && brr && *brr > 0) {
+            std::wstring url = L"<unknown>";
             DWORD dwUrlLength = 0;
-            WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_URL, WINHTTP_HEADER_NAME_BY_INDEX, NULL, &dwUrlLength, WINHTTP_NO_HEADER_INDEX);
-            if (dwUrlLength > 0) {
-                std::vector<wchar_t> urlBuffer(dwUrlLength / sizeof(wchar_t));
-                WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_URL, WINHTTP_HEADER_NAME_BY_INDEX, urlBuffer.data(), &dwUrlLength, WINHTTP_NO_HEADER_INDEX);
-                std::wstring url(urlBuffer.begin(), urlBuffer.end() - 1);
-                
-                LOG_INFO_F(L"WinHTTP", L"Intercepted WinHttpReadData - URL: %s, Read: %d bytes", url.c_str(), *brr);
-                LOG_DATA(LogLevel::DEBUG, L"WinHTTP", L"Response data", b, *brr);
-                
-                CreateAndSendEvent(ApiType::WinHttpRead, url, b, *brr);
-            } else {
-                LOG_WARN(L"WinHTTP", L"Failed to get URL from request handle");
+            
+            // Try WINHTTP_QUERY_URI first
+            if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_URI, WINHTTP_HEADER_NAME_BY_INDEX, NULL, &dwUrlLength, WINHTTP_NO_HEADER_INDEX) || 
+                GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+                std::vector<wchar_t> urlBuffer(dwUrlLength / sizeof(wchar_t) + 1);
+                if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_URI, WINHTTP_HEADER_NAME_BY_INDEX, urlBuffer.data(), &dwUrlLength, WINHTTP_NO_HEADER_INDEX)) {
+                    url = std::wstring(urlBuffer.data());
+                }
             }
+            
+            // If that didn't work, try to get the Host header
+            if (url == L"<unknown>") {
+                DWORD hostLength = 0;
+                if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_HOST, WINHTTP_HEADER_NAME_BY_INDEX, NULL, &hostLength, WINHTTP_NO_HEADER_INDEX) || 
+                    GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+                    std::vector<wchar_t> hostBuffer(hostLength / sizeof(wchar_t) + 1);
+                    if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_HOST, WINHTTP_HEADER_NAME_BY_INDEX, hostBuffer.data(), &hostLength, WINHTTP_NO_HEADER_INDEX)) {
+                        url = L"https://" + std::wstring(hostBuffer.data());
+                    }
+                }
+            }
+            
+            LOG_INFO_F(L"WinHTTP", L"Intercepted WinHttpReadData - URL: %s, Read: %d bytes", url.c_str(), *brr);
+            LOG_DATA(LogLevel::DEBUG, L"WinHTTP", L"Response data", b, *brr);
+            
+            CreateAndSendEvent(ApiType::WinHttpRead, url, b, *brr);
         } else if (!result) {
             LOG_DEBUG_F(L"WinHTTP", L"WinHttpReadData failed or returned no data (result: %d)", result);
         }

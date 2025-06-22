@@ -14,7 +14,15 @@
 #include "nlohmann/json.hpp" // For parsing config
 #include <sstream>
 #include <regex>
+#include <psapi.h>
+#include <iomanip>
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "psapi.lib")
+
+// Define if not available in older SDKs
+#ifndef PROCESSOR_ARCHITECTURE_ARM64
+#define PROCESSOR_ARCHITECTURE_ARM64 12
+#endif
 
 // Simple logging for injector
 static void LogInjector(const std::wstring& level, const std::wstring& message) {
@@ -50,16 +58,101 @@ static std::string MachineTypeToString(WORD machine) {
     }
 }
 
+// Get PE machine type by reading the file directly
+static WORD GetPeMachineFromFile(const std::wstring& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        std::wcout << L"[DEBUG] Cannot open file: " << path << std::endl;
+        return 0;
+    }
+    
+    // Read DOS header
+    IMAGE_DOS_HEADER dosHeader{};
+    file.read(reinterpret_cast<char*>(&dosHeader), sizeof(dosHeader));
+    if (!file || dosHeader.e_magic != IMAGE_DOS_SIGNATURE) {
+        std::wcout << L"[DEBUG] Invalid DOS header in: " << path << std::endl;
+        return 0;
+    }
+    
+    // Seek to NT headers
+    file.seekg(dosHeader.e_lfanew, std::ios::beg);
+    if (!file) {
+        std::wcout << L"[DEBUG] Cannot seek to NT headers in: " << path << std::endl;
+        return 0;
+    }
+    
+    // Read NT headers
+    IMAGE_NT_HEADERS ntHeaders{};
+    file.read(reinterpret_cast<char*>(&ntHeaders), sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER));
+    if (!file || ntHeaders.Signature != IMAGE_NT_SIGNATURE) {
+        std::wcout << L"[DEBUG] Invalid NT signature in: " << path << std::endl;
+        return 0;
+    }
+    
+    WORD machine = ntHeaders.FileHeader.Machine;
+    std::wcout << L"[DEBUG] File " << path << L" has machine type: 0x" 
+              << std::hex << machine << std::dec 
+              << L" (" << MachineTypeToString(machine).c_str() << L")" << std::endl;
+    
+    return machine;
+}
+
 // Gets the architecture of a running process. Returns 0 on failure.
 static WORD GetProcessArchitecture(HANDLE hProcess) {
     USHORT processMachine = 0;
     USHORT nativeMachine = 0;
-    if (IsWow64Process2(hProcess, &processMachine, &nativeMachine)) {
-        if (processMachine == IMAGE_FILE_MACHINE_UNKNOWN) {
-            return nativeMachine; // Process is running natively
+    BOOL result = IsWow64Process2(hProcess, &processMachine, &nativeMachine);
+    
+    std::wcout << L"[DEBUG] IsWow64Process2 result: " << result 
+              << L", processMachine: 0x" << std::hex << processMachine 
+              << L", nativeMachine: 0x" << std::hex << nativeMachine << std::dec << std::endl;
+    
+    if (result) {
+        // If processMachine is IMAGE_FILE_MACHINE_UNKNOWN (0), it means the process
+        // is running natively on the system. But we need to check what the actual
+        // architecture of the process is, not what the native system is.
+        
+        // For x64 processes on ARM64 Windows, processMachine will be IMAGE_FILE_MACHINE_AMD64
+        // For ARM64 processes on ARM64 Windows, processMachine will be IMAGE_FILE_MACHINE_UNKNOWN
+        
+        if (processMachine != IMAGE_FILE_MACHINE_UNKNOWN) {
+            // Process is running under emulation/WOW
+            std::wcout << L"[DEBUG] Process is emulated, returning processMachine" << std::endl;
+            return processMachine;
         }
-        return processMachine; // Process is running under WOW64
+        
+        // Process is running natively, but we need to determine its actual architecture
+        // by reading the PE header
+        std::wcout << L"[DEBUG] Process is native, checking PE header..." << std::endl;
     }
+    
+    // Read PE header directly to get the actual architecture
+    std::wcout << L"[DEBUG] Reading PE header directly..." << std::endl;
+    
+    // Get the base address of the process
+    HMODULE hMods[1024];
+    DWORD cbNeeded;
+    if (EnumProcessModules(hProcess, hMods, sizeof(hMods), &cbNeeded)) {
+        if (cbNeeded > 0) {
+            // Read DOS header
+            IMAGE_DOS_HEADER dosHeader;
+            SIZE_T bytesRead;
+            if (ReadProcessMemory(hProcess, hMods[0], &dosHeader, sizeof(dosHeader), &bytesRead)) {
+                if (dosHeader.e_magic == IMAGE_DOS_SIGNATURE) {
+                    // Read NT headers
+                    IMAGE_NT_HEADERS ntHeaders;
+                    LPVOID ntHeaderAddr = (LPBYTE)hMods[0] + dosHeader.e_lfanew;
+                    if (ReadProcessMemory(hProcess, ntHeaderAddr, &ntHeaders, sizeof(ntHeaders), &bytesRead)) {
+                        if (ntHeaders.Signature == IMAGE_NT_SIGNATURE) {
+                            std::wcout << L"[DEBUG] PE header machine type: 0x" << std::hex << ntHeaders.FileHeader.Machine << std::dec << std::endl;
+                            return ntHeaders.FileHeader.Machine;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
     return 0; // Failed to get architecture
 }
 
@@ -280,7 +373,13 @@ static std::wstring GetAbsoluteDllPath() {
     wchar_t injectorPath[MAX_PATH];
     if (GetModuleFileNameW(NULL, injectorPath, MAX_PATH) != 0) {
         std::filesystem::path base = std::filesystem::path(injectorPath).parent_path();
+        
+        // For build_x64/injector/Release/ai_injector.exe
         candidates.push_back(base.parent_path().parent_path() / L"dll" / kConfig / L"ai_hook.dll");
+        
+        // For build_vs/injector/Release/ai_injector.exe
+        candidates.push_back(base.parent_path().parent_path() / L"dll" / kConfig / L"ai_hook.dll");
+        
         // Non build_vs variant (build/)
         candidates.push_back(base.parent_path().parent_path().parent_path() / L"build" / L"dll" / kConfig / L"ai_hook.dll");
     }
@@ -291,6 +390,7 @@ static std::wstring GetAbsoluteDllPath() {
     // 3. Common relative paths
     candidates.push_back(std::filesystem::path(L"build_vs") / L"dll" / kConfig / L"ai_hook.dll");
     candidates.push_back(std::filesystem::path(L"build") / L"dll" / kConfig / L"ai_hook.dll");
+    candidates.push_back(std::filesystem::path(L"build_x64") / L"dll" / kConfig / L"ai_hook.dll");
 
     for (const auto& p : candidates) {
         std::error_code ec;
@@ -389,19 +489,133 @@ afterToken:
     std::wcerr << L"[Injector] =====================================" << std::endl;
 }
 
+// Manual DLL injection using CreateRemoteThread
+bool InjectDllManually(HANDLE hProcess, const wchar_t* dllPath) {
+    std::wcout << L"[Injector] Attempting manual injection using CreateRemoteThread..." << std::endl;
+    std::wcout.flush();
+    
+    // Allocate memory in the target process for the DLL path
+    size_t dllPathSize = (wcslen(dllPath) + 1) * sizeof(wchar_t);
+    LPVOID remoteDllPath = VirtualAllocEx(hProcess, NULL, dllPathSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    
+    if (!remoteDllPath) {
+        std::wcerr << L"[Injector] VirtualAllocEx failed: " << GetLastError() << std::endl;
+        std::wcerr.flush();
+        return false;
+    }
+    
+    // Write the DLL path to the allocated memory
+    SIZE_T written;
+    if (!WriteProcessMemory(hProcess, remoteDllPath, dllPath, dllPathSize, &written)) {
+        std::wcerr << L"[Injector] WriteProcessMemory failed: " << GetLastError() << std::endl;
+        std::wcerr.flush();
+        VirtualFreeEx(hProcess, remoteDllPath, 0, MEM_RELEASE);
+        return false;
+    }
+    
+    // Get the address of LoadLibraryW in kernel32.dll
+    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+    if (!hKernel32) {
+        std::wcerr << L"[Injector] GetModuleHandle(kernel32.dll) failed" << std::endl;
+        std::wcerr.flush();
+        VirtualFreeEx(hProcess, remoteDllPath, 0, MEM_RELEASE);
+        return false;
+    }
+    
+    LPTHREAD_START_ROUTINE loadLibraryAddr = (LPTHREAD_START_ROUTINE)GetProcAddress(hKernel32, "LoadLibraryW");
+    if (!loadLibraryAddr) {
+        std::wcerr << L"[Injector] GetProcAddress(LoadLibraryW) failed" << std::endl;
+        std::wcerr.flush();
+        VirtualFreeEx(hProcess, remoteDllPath, 0, MEM_RELEASE);
+        return false;
+    }
+    
+    // Create a remote thread to call LoadLibraryW
+    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, loadLibraryAddr, remoteDllPath, 0, NULL);
+    if (!hThread) {
+        std::wcerr << L"[Injector] CreateRemoteThread failed: " << GetLastError() << std::endl;
+        std::wcerr.flush();
+        VirtualFreeEx(hProcess, remoteDllPath, 0, MEM_RELEASE);
+        return false;
+    }
+    
+    // Wait for the thread to complete
+    std::wcout << L"[Injector] Waiting for remote thread to complete..." << std::endl;
+    std::wcout.flush();
+    WaitForSingleObject(hThread, INFINITE);
+    
+    // Get the exit code (which should be the HMODULE of the loaded DLL)
+    DWORD exitCode;
+    GetExitCodeThread(hThread, &exitCode);
+    CloseHandle(hThread);
+    
+    // Clean up
+    VirtualFreeEx(hProcess, remoteDllPath, 0, MEM_RELEASE);
+    
+    if (exitCode != 0) {
+        std::wcout << L"[Injector] LoadLibraryW returned: 0x" << std::hex << exitCode << std::dec << std::endl;
+        std::wcout.flush();
+        return true;
+    } else {
+        std::wcerr << L"[Injector] LoadLibraryW failed in target process" << std::endl;
+        std::wcerr.flush();
+        return false;
+    }
+}
+
 // Simple wrapper around CreateProcessW + DetourUpdateProcessWithDllW
-bool StartProcessAndInject(const std::wstring& cmdline, DWORD* outPid) {
-    STARTUPINFOW si{sizeof(si)};
+bool StartProcessAndInject(const std::wstring& commandLine, const std::wstring& dllPath, bool waitForExit, bool withChildren) {
+    std::wcout << L"[Injector] Launching: \"" << commandLine << L"\"" << std::endl;
+
+    // === Pre-flight Architecture Check ===
+    // Try to determine the target architecture before launching
+    WORD injectorArch = GetInjectorArchitecture();
+    WORD targetArch = IMAGE_FILE_MACHINE_UNKNOWN;
+    
+    // Extract the executable path from the command line
+    std::wstring exePath;
+    if (!commandLine.empty() && commandLine.front() == L'"') {
+        // Quoted path
+        size_t endQuote = commandLine.find(L'"', 1);
+        if (endQuote != std::wstring::npos) {
+            exePath = commandLine.substr(1, endQuote - 1);
+        }
+    } else {
+        // Unquoted path - take everything up to the first space
+        size_t space = commandLine.find(L' ');
+        exePath = (space != std::wstring::npos) ? commandLine.substr(0, space) : commandLine;
+    }
+    
+    if (!exePath.empty()) {
+        // Convert relative path to absolute if needed
+        wchar_t absolutePath[MAX_PATH * 2] = {0};
+        if (GetFullPathNameW(exePath.c_str(), sizeof(absolutePath) / sizeof(wchar_t), absolutePath, nullptr)) {
+            std::wcout << L"[DEBUG] Checking architecture of: " << absolutePath << std::endl;
+            targetArch = GetPeMachineFromFile(absolutePath);
+        }
+    }
+    
+    // Check for architecture mismatch before even launching
+    if (injectorArch != 0 && targetArch != IMAGE_FILE_MACHINE_UNKNOWN && targetArch != 0 && injectorArch != targetArch) {
+        std::wcerr << L"\n[Injector] ✗ CRITICAL: Architecture mismatch detected before launch!" << std::endl;
+        std::wcerr << L"  Injector : " << MachineTypeToString(injectorArch).c_str() << std::endl;
+        std::wcerr << L"  Target   : " << MachineTypeToString(targetArch).c_str() << std::endl;
+        std::wcerr << L"  Build the injector / DLL for the same architecture." << std::endl;
+        return false;
+    }
+
+    STARTUPINFOW si{};
     PROCESS_INFORMATION pi{};
+    si.cb = sizeof(si);
 
     std::wcout << L"[Injector] Creating process..." << std::endl;
     std::wcout.flush();
-    if (!CreateProcessW(nullptr, const_cast<LPWSTR>(cmdline.c_str()), nullptr, nullptr,
+    if (!CreateProcessW(nullptr, const_cast<LPWSTR>(commandLine.c_str()), nullptr, nullptr,
                         FALSE, CREATE_SUSPENDED, nullptr, nullptr, &si, &pi)) {
         DWORD err = GetLastError();
         std::wcerr << L"[Injector] CreateProcess failed with error " << err << L" (" << Win32ErrorMessage(err) << L")" << std::endl;
         std::wcerr.flush();
-        LogCreateProcessDiagnostics(cmdline, err);
+        LogCreateProcessDiagnostics(commandLine, err);
         return false;
     }
 
@@ -413,28 +627,38 @@ bool StartProcessAndInject(const std::wstring& cmdline, DWORD* outPid) {
     std::wcout.flush();
     Sleep(100); // 100ms delay
     
-    // === Architecture Mismatch Check ===
-    WORD injectorArch = GetInjectorArchitecture();
-    WORD targetArch = GetProcessArchitecture(pi.hProcess);
+    // === Architecture Mismatch Check – refuse to continue if injector and target don't match ===
+    injectorArch = GetInjectorArchitecture();
+    targetArch   = GetProcessArchitecture(pi.hProcess);
+    
+    // If we couldn't determine architecture from the process, try reading the file
+    if (targetArch == 0 || targetArch == IMAGE_FILE_MACHINE_UNKNOWN) {
+        // Get the actual executable path
+        wchar_t exePath[MAX_PATH * 2] = {0};
+        DWORD pathSize = sizeof(exePath) / sizeof(wchar_t);
+        
+        if (QueryFullProcessImageNameW(pi.hProcess, 0, exePath, &pathSize)) {
+            std::wcout << L"[DEBUG] Process executable path: " << exePath << std::endl;
+            targetArch = GetPeMachineFromFile(exePath);
+        } else {
+            std::wcout << L"[DEBUG] Failed to get process image path, error: " << GetLastError() << std::endl;
+        }
+    }
 
-    if (injectorArch != 0 && targetArch != 0 && injectorArch != targetArch) {
-        fwprintf(stderr, L"\n[Injector] ✗ CRITICAL: Architecture Mismatch!\n");
-        fwprintf(stderr, L"  Injector is: %hs\n", MachineTypeToString(injectorArch).c_str());
-        fwprintf(stderr, L"  Target EXE is: %hs\n", MachineTypeToString(targetArch).c_str());
-        fwprintf(stderr, L"  This is guaranteed to fail with a 0xc000007b error. Aborting.\n");
-        fwprintf(stderr, L"  Please build the injector and DLL for the correct architecture (e.g., cmake -A ARM64 or -A x64).\n");
-        fflush(stderr);
+    if (injectorArch != 0                    // we know our own machine type
+        && targetArch  != IMAGE_FILE_MACHINE_UNKNOWN   // we could query the target
+        && targetArch  != 0                             // and it's valid
+        && injectorArch != targetArch)                  // mismatch → abort
+    {
+        std::wcerr << L"\n[Injector] ✗ CRITICAL: Architecture mismatch!" << std::endl;
+        std::wcerr << L"  Injector : " << MachineTypeToString(injectorArch).c_str() << std::endl;
+        std::wcerr << L"  Target   : " << MachineTypeToString(targetArch ).c_str() << std::endl;
+        std::wcerr << L"  Build the injector / DLL for the same architecture (use -A ARM64 for ARM native, -A x64 for emulated x64)." << std::endl;
 
         TerminateProcess(pi.hProcess, 1);
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
         return false;
-    } else if (targetArch == 0) {
-        wprintf(L"[Injector] (warning) Could not determine target process architecture. Proceeding with caution.\n");
-        fflush(stdout);
-    } else {
-        wprintf(L"[Injector] ✓ Architecture match validated (%hs).\n", MachineTypeToString(targetArch).c_str());
-        fflush(stdout);
     }
     // ===================================
     
@@ -454,46 +678,131 @@ bool StartProcessAndInject(const std::wstring& cmdline, DWORD* outPid) {
     std::wcout << L"[Injector] Found DLL at: " << absoluteDllPath << std::endl;
     std::wcout.flush();
     
-    char dllPathA[MAX_PATH];
-    WideCharToMultiByte(CP_ACP, 0, absoluteDllPath.c_str(), -1, dllPathA, MAX_PATH, nullptr, nullptr);
-    const char* dlls[] = { dllPathA };
+    // Check if we're on ARM64 Windows trying to inject into x64 process
+    bool isArm64Host = false;
     
-    std::wcout << L"[Injector] Calling DetourUpdateProcessWithDll..." << std::endl;
-    std::wcout.flush();
+    // Use IsWow64Process2 to detect if we're running on ARM64
+    USHORT processMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+    USHORT nativeMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+    typedef BOOL (WINAPI *IsWow64Process2_t)(HANDLE, PUSHORT, PUSHORT);
+    IsWow64Process2_t pIsWow64Process2 = (IsWow64Process2_t)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsWow64Process2");
     
-    // Set last error to 0 to ensure we get the real error
-    SetLastError(0);
-    
-    BOOL detourResult = DetourUpdateProcessWithDll(pi.hProcess, dlls, 1);
-    DWORD detourError = GetLastError();
-    
-    if (!detourResult) {
-        std::wcerr << L"[Injector] DetourUpdateProcessWithDll failed with error: " << detourError << L" (" << Win32ErrorMessage(detourError) << L")" << std::endl;
-        std::wcerr.flush();
-        
-        // Check if DLL exists and is accessible
-        HMODULE testLoad = LoadLibraryExW(absoluteDllPath.c_str(), NULL, DONT_RESOLVE_DLL_REFERENCES);
-        if (testLoad) {
-            std::wcerr << L"[Injector] DLL can be loaded locally, issue might be with target process" << std::endl;
-            std::wcerr.flush();
-            FreeLibrary(testLoad);
-        } else {
-            DWORD loadError = GetLastError();
-            std::wcerr << L"[Injector] DLL cannot be loaded locally, error: " << loadError << L" (" << Win32ErrorMessage(loadError) << L")" << std::endl;
-            std::wcerr.flush();
+    if (pIsWow64Process2 && pIsWow64Process2(GetCurrentProcess(), &processMachine, &nativeMachine)) {
+        std::wcout << L"[DEBUG] Current process: processMachine=0x" << std::hex << processMachine 
+                   << L", nativeMachine=0x" << nativeMachine << std::dec << std::endl;
+        if (nativeMachine == IMAGE_FILE_MACHINE_ARM64) {
+            isArm64Host = true;
+            std::wcout << L"[Injector] Running on ARM64 Windows (detected via IsWow64Process2)" << std::endl;
         }
+    } else {
+        // Fallback to GetNativeSystemInfo
+        SYSTEM_INFO sysInfo;
+        GetNativeSystemInfo(&sysInfo);
+        std::wcout << L"[DEBUG] Native system architecture (fallback): " << sysInfo.wProcessorArchitecture << std::endl;
+        if (sysInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_ARM64) {
+            isArm64Host = true;
+            std::wcout << L"[Injector] Running on ARM64 Windows (detected via GetNativeSystemInfo)" << std::endl;
+        }
+    }
+    
+    bool useManualInjection = false;
+    if (isArm64Host && targetArch == IMAGE_FILE_MACHINE_AMD64) {
+        std::wcout << L"[Injector] x64 process on ARM64 host detected - using manual injection" << std::endl;
+        useManualInjection = true;
+    }
+    
+    if (!useManualInjection) {
+        char dllPathA[MAX_PATH];
+        WideCharToMultiByte(CP_ACP, 0, absoluteDllPath.c_str(), -1, dllPathA, MAX_PATH, nullptr, nullptr);
+        const char* dlls[] = { dllPathA };
         
-        TerminateProcess(pi.hProcess, 1);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        return false;
+        std::wcout << L"[Injector] Calling DetourUpdateProcessWithDll..." << std::endl;
+        std::wcout.flush();
+        
+        // Set last error to 0 to ensure we get the real error
+        SetLastError(0);
+        
+        BOOL detourResult = DetourUpdateProcessWithDll(pi.hProcess, dlls, 1);
+        DWORD detourError = GetLastError();
+        
+        std::wcout << L"[Injector] DetourUpdateProcessWithDll returned: " << (detourResult ? L"TRUE" : L"FALSE") 
+                  << L", GetLastError: " << detourError << std::endl;
+        std::wcout.flush();
+        
+        if (!detourResult) {
+            std::wcerr << L"[Injector] DetourUpdateProcessWithDll failed with error: " << detourError << L" (" << Win32ErrorMessage(detourError) << L")" << std::endl;
+            std::wcerr.flush();
+            
+            // Check if DLL exists and is accessible
+            HMODULE testLoad = LoadLibraryExW(absoluteDllPath.c_str(), NULL, DONT_RESOLVE_DLL_REFERENCES);
+            if (testLoad) {
+                std::wcerr << L"[Injector] DLL can be loaded locally, issue might be with target process" << std::endl;
+                std::wcerr.flush();
+                FreeLibrary(testLoad);
+            } else {
+                DWORD loadError = GetLastError();
+                std::wcerr << L"[Injector] DLL cannot be loaded locally, error: " << loadError << L" (" << Win32ErrorMessage(loadError) << L")" << std::endl;
+                std::wcerr.flush();
+            }
+            
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            return false;
+        }
+    } else {
+        // Use manual injection for x64 on ARM64
+        std::wcout << L"[Injector] Resuming process for manual injection..." << std::endl;
+        ResumeThread(pi.hThread);
+        
+        // Give process time to initialize
+        Sleep(500);
+        
+        if (InjectDllManually(pi.hProcess, absoluteDllPath.c_str())) {
+            std::wcout << L"[Injector] ✓ Manual injection successful!" << std::endl;
+            std::wcout.flush();
+        } else {
+            std::wcerr << L"[Injector] ✗ Manual injection failed" << std::endl;
+            std::wcerr.flush();
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            return false;
+        }
     }
 
-    std::wcout << L"[Injector] ✓ Main process injection successful, resuming..." << std::endl;
+    if (!useManualInjection) {
+        std::wcout << L"[Injector] ✓ Main process injection successful, resuming..." << std::endl;
+        std::wcout.flush();
+        ResumeThread(pi.hThread);
+    }
+    
+    // Wait a bit to see if the process stays alive
+    std::wcout << L"[Injector] Waiting for process to initialize with DLL..." << std::endl;
     std::wcout.flush();
-    ResumeThread(pi.hThread);
-    if (outPid) *outPid = pi.dwProcessId;
-
+    Sleep(1000);
+    
+    // Check if process is still alive
+    DWORD exitCode;
+    if (GetExitCodeProcess(pi.hProcess, &exitCode)) {
+        if (exitCode != STILL_ACTIVE) {
+            std::wcerr << L"[Injector] Process exited with code: " << exitCode << L" (0x" << std::hex << exitCode << std::dec << L")" << std::endl;
+            std::wcerr.flush();
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            return false;
+        } else {
+            std::wcout << L"[Injector] Process is still running after injection" << std::endl;
+            std::wcout.flush();
+        }
+    }
+    
+    if (waitForExit) {
+        std::wcout << L"[Injector] Waiting for process to exit..." << std::endl;
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        std::wcout << L"[Injector] Process has exited" << std::endl;
+    }
+    
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     return true;
@@ -566,7 +875,7 @@ int wmain(int argc, wchar_t* argv[]) {
 #endif
     // Launch main process and inject
     DWORD mainPid = 0;
-    if (!StartProcessAndInject(final_cmdline, &mainPid)) {
+    if (!StartProcessAndInject(final_cmdline, GetAbsoluteDllPath(), true, withChildren)) {
         std::wcerr << L"[Injector] ✗ Failed to start and inject into the main process." << std::endl;
         std::wcerr.flush();
         return 1;
