@@ -275,104 +275,65 @@ DWORD WINAPI Mine_WinHttpWebSocketReceive(HINTERNET h, PVOID b, DWORD l, LPDWORD
     return result;
 }
 
-// --- BoringSSL Detour ---
-// Ensure proper stack alignment for Windows on ARM compatibility
-int __cdecl Mine_SSL_write(SSL* ssl, const void* buf, int num) {
-    // Ensure 16-byte stack alignment for WoA compatibility
-    volatile int dummy[4] = {0};
-    (void)dummy; // Prevent optimization
-    
-    LOG_TRACE_F(L"SSL", L"SSL_write called - ssl: 0x%p, dataLen: %d", ssl, num);
-    
-    try {
-        if (Real_SSL_get_servername && ssl) {
-            const char* servername = Real_SSL_get_servername(ssl, 0); // 0 for TLSEXT_NAMETYPE_host_name
-            if (servername) {
-                // Convert char* to wstring
-                int size_needed = MultiByteToWideChar(CP_UTF8, 0, servername, (int)strlen(servername), NULL, 0);
-                std::wstring wServername(size_needed, 0);
-                MultiByteToWideChar(CP_UTF8, 0, servername, (int)strlen(servername), &wServername[0], size_needed);
-                
-                LOG_INFO_F(L"SSL", L"Intercepted SSL_write - Server: %s, Size: %d bytes", wServername.c_str(), num);
-                LOG_DATA(LogLevel::DEBUG, L"SSL", L"SSL write data", buf, num);
-                
-                CreateAndSendEvent(ApiType::SslWrite, wServername, buf, num);
-            } else {
-                LOG_DEBUG(L"SSL", L"SSL_write called but no servername available");
-            }
-        } else {
-            LOG_WARN_F(L"SSL", L"SSL_write called but Real_SSL_get_servername is null (0x%p) or ssl is null", Real_SSL_get_servername);
-        }
-    } catch (...) {
-        LOG_ERROR(L"SSL", L"Unhandled exception in Mine_SSL_write");
-        EtwTraceMessage(L"Unhandled exception in Mine_SSL_write. Passing through.");
-    }
-    return Real_SSL_write(ssl, buf, num);
-}
-
-// --- BoringSSL Detour for SSL_read ---
-int __cdecl Mine_SSL_read(SSL* ssl, void* buf, int num) {
-    // Ensure 16-byte stack alignment for WoA compatibility
-    volatile int dummy[4] = {0};
-    (void)dummy; // Prevent optimization
-    
-    LOG_TRACE_F(L"SSL", L"SSL_read called - ssl: 0x%p, bufferSize: %d", ssl, num);
-    
-    int bytes_read = Real_SSL_read(ssl, buf, num);
-    try {
-        if (bytes_read > 0 && Real_SSL_get_servername && ssl) {
-            const char* servername = Real_SSL_get_servername(ssl, 0); // 0 for TLSEXT_NAMETYPE_host_name
-            if (servername) {
-                // Convert char* to wstring
-                int size_needed = MultiByteToWideChar(CP_UTF8, 0, servername, (int)strlen(servername), NULL, 0);
-                std::wstring wServername(size_needed, 0);
-                MultiByteToWideChar(CP_UTF8, 0, servername, (int)strlen(servername), &wServername[0], size_needed);
-                
-                LOG_INFO_F(L"SSL", L"Intercepted SSL_read - Server: %s, Read: %d bytes", wServername.c_str(), bytes_read);
-                LOG_DATA(LogLevel::DEBUG, L"SSL", L"SSL read data", buf, bytes_read);
-                
-                CreateAndSendEvent(ApiType::SslRead, wServername, buf, bytes_read);
-            } else {
-                LOG_DEBUG(L"SSL", L"SSL_read returned data but no servername available");
-            }
-        } else if (bytes_read <= 0) {
-            LOG_TRACE_F(L"SSL", L"SSL_read returned %d (no data or error)", bytes_read);
-        }
-    } catch (...) {
-        LOG_ERROR(L"SSL", L"Unhandled exception in Mine_SSL_read");
-        EtwTraceMessage(L"Unhandled exception in Mine_SSL_read. Passing through.");
-    }
-    return bytes_read;
-}
+// Key-log-only strategy: We don't hook SSL_write/SSL_read anymore to avoid
+// interfering with the SSL handshake and certificate validation.
+// Instead, we only use SSL_new to set up keylog callbacks.
 
 // --- SSL Keylog Callback ---
+// This callback is called by BoringSSL/OpenSSL when TLS session keys are generated.
+// The format is compatible with Wireshark's SSL keylog file format.
 void MyKeylogCallback(const SSL *ssl, const char *line) {
     try {
         if (line && strlen(line) > 0) {
+            LOG_TRACE_F(L"SSL", L"Keylog callback invoked - line length: %d", strlen(line));
+            
             std::string line_str(line);
             std::vector<unsigned char> data(line_str.begin(), line_str.end());
             
-            std::wstring server_name_wstr;
+            std::wstring server_name_wstr = L"<unknown>";
             if (ssl && Real_SSL_get_servername) {
                 const char* server_name_cstr = Real_SSL_get_servername(ssl, 0); // 0 for TLSEXT_NAMETYPE_host_name
                 if (server_name_cstr) {
                     // Convert char* to wstring
                     int size_needed = MultiByteToWideChar(CP_UTF8, 0, server_name_cstr, (int)strlen(server_name_cstr), NULL, 0);
-                    server_name_wstr.resize(size_needed);
-                    MultiByteToWideChar(CP_UTF8, 0, server_name_cstr, (int)strlen(server_name_cstr), &server_name_wstr[0], size_needed);
+                    if (size_needed > 0) {
+                        server_name_wstr.resize(size_needed);
+                        MultiByteToWideChar(CP_UTF8, 0, server_name_cstr, (int)strlen(server_name_cstr), &server_name_wstr[0], size_needed);
+                        LOG_INFO_F(L"SSL", L"SSL keylog for host: %s", server_name_wstr.c_str());
+                    }
                 }
             }
-            if (server_name_wstr.empty()) {
-                server_name_wstr = L"UnknownHost_KeyLog";
-            }
+            
+            // Send the keylog line to collector/file
             CreateAndSendEvent(ApiType::SslKeyLog, server_name_wstr, data.data(), data.size());
+            
+            // Also write to a local keylog file for Wireshark compatibility
+            static bool keylogFileInitialized = false;
+            static std::wstring keylogPath;
+            if (!keylogFileInitialized) {
+                wchar_t tempPath[MAX_PATH];
+                GetTempPathW(MAX_PATH, tempPath);
+                keylogPath = std::wstring(tempPath) + L"ai_hook_keylog.txt";
+                keylogFileInitialized = true;
+                LOG_INFO_F(L"SSL", L"SSL keylog file: %s", keylogPath.c_str());
+            }
+            
+            // Append to keylog file
+            FILE* keylogFile = nullptr;
+            if (_wfopen_s(&keylogFile, keylogPath.c_str(), L"ab") == 0 && keylogFile) {
+                fprintf(keylogFile, "%s\n", line);
+                fclose(keylogFile);
+            }
         }
     } catch (...) {
+        LOG_ERROR(L"SSL", L"Unhandled exception in MyKeylogCallback");
         EtwTraceMessage(L"Unhandled exception in MyKeylogCallback. Ignoring.");
     }
 }
 
-// --- BoringSSL Detour for SSL_new (to get SSL_CTX* for keylog callback) ---
+// --- BoringSSL Detour for SSL_new (keylog-only strategy) ---
+// This is the only SSL function we hook to enable keylogging without
+// interfering with the handshake or data transfer.
 SSL* Mine_SSL_new(SSL_CTX *ctx) {
     // Ensure 16-byte stack alignment for WoA compatibility
     volatile int dummy[4] = {0};
@@ -380,20 +341,25 @@ SSL* Mine_SSL_new(SSL_CTX *ctx) {
     
     SSL* ssl_session = nullptr;
     try {
-        if (Real_SSL_new) { // Ensure Real_SSL_new is resolved
+        // Call the original SSL_new first
+        if (Real_SSL_new) {
             ssl_session = Real_SSL_new(ctx);
+            LOG_TRACE_F(L"SSL", L"SSL_new called - ctx: 0x%p, ssl: 0x%p", ctx, ssl_session);
         }
 
-        if (ctx && Real_SSL_CTX_set_keylog_callback && ssl_session) { // Check ssl_session too, SSL_new might fail
-            // Check if we've already set the callback for this context
+        // Set up keylog callback if not already done for this context
+        if (ctx && ssl_session && Real_SSL_CTX_set_keylog_callback) {
             if (g_processed_ssl_contexts.find(ctx) == g_processed_ssl_contexts.end()) {
                 Real_SSL_CTX_set_keylog_callback(ctx, MyKeylogCallback);
                 g_processed_ssl_contexts.insert(ctx);
+                LOG_INFO_F(L"SSL", L"Registered SSL keylog callback for SSL_CTX: 0x%p", ctx);
                 EtwTraceMessage(L"Registered SSL keylog callback for a new SSL_CTX.");
             }
         }
     } catch (...) {
+        LOG_ERROR(L"SSL", L"Unhandled exception in Mine_SSL_new");
         EtwTraceMessage(L"Unhandled exception in Mine_SSL_new. Passing through.");
+        // Return the SSL session if we got one, otherwise try calling original again
         if (!ssl_session && Real_SSL_new) {
             return Real_SSL_new(ctx);
         }
@@ -526,14 +492,7 @@ void TryGetSslFunctionsFromExports() {
             LOG_DEBUG_F(L"SSL", L"Checking module for SSL exports: %s", moduleName);
             EtwTraceMessage((std::wstring(L"Checking module for SSL exports: ") + moduleName).c_str());
             
-            if (!Real_SSL_write) {
-                Real_SSL_write = (SSL_write_t)GetProcAddress(hMod, "SSL_write");
-                if (Real_SSL_write) LOG_INFO_F(L"SSL", L"Found SSL_write in %s", moduleName);
-            }
-            if (!Real_SSL_read) {
-                Real_SSL_read = (SSL_read_t)GetProcAddress(hMod, "SSL_read");
-                if (Real_SSL_read) LOG_INFO_F(L"SSL", L"Found SSL_read in %s", moduleName);
-            }
+            // Key-log-only strategy: We only need SSL_new and SSL_CTX_set_keylog_callback
             if (!Real_SSL_get_servername) {
                 Real_SSL_get_servername = (SSL_get_servername_t)GetProcAddress(hMod, "SSL_get_servername");
                 if (Real_SSL_get_servername) LOG_INFO_F(L"SSL", L"Found SSL_get_servername in %s", moduleName);
@@ -547,11 +506,14 @@ void TryGetSslFunctionsFromExports() {
                 if (Real_SSL_new) LOG_INFO_F(L"SSL", L"Found SSL_new in %s", moduleName);
             }
             
-            // If we found all essential functions, we can stop searching modules
-            // SSL_get_servername is helpful but not strictly essential for keylogging if SSL_CTX_set_keylog_callback and SSL_new are found.
-            if (Real_SSL_write && Real_SSL_read && Real_SSL_CTX_set_keylog_callback && Real_SSL_new && Real_SSL_get_servername) {
-                LOG_INFO(L"SSL", L"Found all SSL functions via GetProcAddress");
-                EtwTraceMessage(L"Found all SSL functions via GetProcAddress.");
+            // For keylog-only strategy, we need SSL_new and SSL_CTX_set_keylog_callback
+            // SSL_get_servername is optional but helpful for host identification
+            if (Real_SSL_CTX_set_keylog_callback && Real_SSL_new) {
+                LOG_INFO(L"SSL", L"Found essential SSL functions for keylogging via GetProcAddress");
+                EtwTraceMessage(L"Found essential SSL functions for keylogging via GetProcAddress.");
+                if (Real_SSL_get_servername) {
+                    LOG_INFO(L"SSL", L"Also found SSL_get_servername for host identification");
+                }
                 return;
             }
         }
@@ -561,7 +523,7 @@ void TryGetSslFunctionsFromExports() {
 }
 
 void InstallSslHooks() {
-    LOG_INFO(L"SSL", L"Installing SSL hooks");
+    LOG_INFO(L"SSL", L"Installing SSL keylog-only hooks");
     
     // Check if SSL hooks are disabled via environment variable
     char* disableSslHooks = getenv("AITI_DISABLE_SSL_HOOKS");
@@ -570,6 +532,11 @@ void InstallSslHooks() {
         EtwTraceMessage(L"SSL hooks disabled via AITI_DISABLE_SSL_HOOKS environment variable");
         return;
     }
+    
+    // Key-log-only strategy: We only hook SSL_new to set up keylog callbacks.
+    // This avoids interfering with SSL handshakes and certificate validation.
+    // The keylog file will be created at %TEMP%\ai_hook_keylog.txt
+    // You can use this file with Wireshark: Edit -> Preferences -> Protocols -> TLS -> (Pre)-Master-Secret log filename
     
     // Check if SSL hooks should be skipped for this process based on config
     std::wstring currentProcessName = GetProcessName(GetCurrentProcessId());
@@ -653,30 +620,24 @@ void InstallSslHooks() {
     // For now, chrome.dll is the primary target for pattern scanning if exports fail.
     HMODULE hTargetModuleForScanning = GetModuleHandleW(L"chrome.dll"); 
     if (!hTargetModuleForScanning) {
-         // If chrome.dll isn't there, and we haven't found functions by export, SSL hooks won't work.
-        if (!Real_SSL_write && !Real_SSL_read) { // Check if any essential func is missing
-            LOG_WARN(L"SSL", L"Target module (e.g., chrome.dll) not found, and SSL functions not found by export. Skipping SSL pattern scan.");
-            EtwTraceMessage(L"Target module (e.g., chrome.dll) not found, and SSL functions not found by export. Skipping SSL pattern scan.");
+         // If chrome.dll isn't there, and we haven't found functions by export, keylogging won't work.
+        if (!Real_SSL_CTX_set_keylog_callback || !Real_SSL_new) {
+            LOG_WARN(L"SSL", L"Target module (e.g., chrome.dll) not found, and essential SSL functions not found by export. Keylogging not available.");
+            EtwTraceMessage(L"Target module (e.g., chrome.dll) not found, and essential SSL functions not found by export. Keylogging not available.");
             return;
         }
-        // If some were found by export, we might not need to scan chrome.dll
+        // If essential functions were found by export, we don't need to scan chrome.dll
     }
 
-    // Proceed with pattern scanning if functions are not yet found AND hTargetModuleForScanning is valid
-    bool needsPatternScan = (!Real_SSL_write || !Real_SSL_read || !Real_SSL_get_servername || !Real_SSL_CTX_set_keylog_callback || !Real_SSL_new) && hTargetModuleForScanning;
+    // Proceed with pattern scanning if essential functions are not yet found AND hTargetModuleForScanning is valid
+    bool needsPatternScan = (!Real_SSL_CTX_set_keylog_callback || !Real_SSL_new || !Real_SSL_get_servername) && hTargetModuleForScanning;
 
     if (needsPatternScan) {
         LOG_INFO(L"SSL", L"Attempting SSL function pattern scanning in target module (e.g. chrome.dll)");
         EtwTraceMessage(L"Attempting SSL function pattern scanning in target module (e.g. chrome.dll).");
     
-    // Validated patterns for x64 versions of BoringSSL found in recent Chrome/Electron.
-    // SSL_write: 48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B F9
-    const unsigned char ssl_write_pattern[] = { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xF9 };
-    const char ssl_write_mask[] = "xxxxxxxxxxxxxxxxxxxxxxx";
-    
-    // SSL_read: 48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B DA
-    const unsigned char ssl_read_pattern[] = { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xDA };
-    const char ssl_read_mask[] = "xxxxxxxxxxxxxxxxxx";
+    // Key-log-only strategy: We only need patterns for SSL_new, SSL_CTX_set_keylog_callback, and optionally SSL_get_servername
+    // We no longer hook SSL_write/SSL_read to avoid interfering with handshakes
 
     // SSL_get_servername: 48 83 EC 28 48 8B 49 10 48 85 C9 74 08 48 8B 01 FF 50 18
     const unsigned char ssl_get_servername_pattern[] = { 0x48, 0x83, 0xEC, 0x28, 0x48, 0x8B, 0x49, 0x10, 0x48, 0x85, 0xC9, 0x74, 0x08, 0x48, 0x8B, 0x01, 0xFF, 0x50, 0x18 };
@@ -691,23 +652,13 @@ void InstallSslHooks() {
     const char ssl_ctx_set_keylog_callback_mask[] = "xxxxxxxxxxxxxxxxxxxxxx";
 
 
-    uintptr_t ssl_write_addr = 0, ssl_get_servername_addr = 0, ssl_read_addr = 0;
+    uintptr_t ssl_get_servername_addr = 0;
     uintptr_t ssl_ctx_set_keylog_callback_addr = 0, ssl_new_addr = 0;
 
-    if (!Real_SSL_write) {
-        ssl_write_addr = FindPattern(hTargetModuleForScanning, ssl_write_pattern, ssl_write_mask);
-        if (ssl_write_addr) Real_SSL_write = (SSL_write_t)ssl_write_addr;
-        else EtwTraceMessage(L"SSL_write pattern not found.");
-    }
     if (!Real_SSL_get_servername) {
         ssl_get_servername_addr = FindPattern(hTargetModuleForScanning, ssl_get_servername_pattern, ssl_get_servername_mask);
         if (ssl_get_servername_addr) Real_SSL_get_servername = (SSL_get_servername_t)ssl_get_servername_addr;
         else EtwTraceMessage(L"SSL_get_servername pattern not found.");
-    }
-    if (!Real_SSL_read) {
-        ssl_read_addr = FindPattern(hTargetModuleForScanning, ssl_read_pattern, ssl_read_mask);
-        if (ssl_read_addr) Real_SSL_read = (SSL_read_t)ssl_read_addr;
-        else EtwTraceMessage(L"SSL_read pattern not found.");
     }
     if (!Real_SSL_CTX_set_keylog_callback) {
         ssl_ctx_set_keylog_callback_addr = FindPattern(hTargetModuleForScanning, ssl_ctx_set_keylog_callback_pattern, ssl_ctx_set_keylog_callback_mask);
@@ -722,39 +673,39 @@ void InstallSslHooks() {
 
     } // End of if(needsPatternScan)
 
-    // Attach hooks if functions are found (either by export or pattern)
+    // Key-log-only strategy: Only attach SSL_new hook for keylogging
     bool attachedAnySsl = false;
 
-    if (Real_SSL_write) {
-        DetourAttach(&(PVOID&)Real_SSL_write, Mine_SSL_write);
-        EtwTraceMessage(L"Attached to SSL_write.");
+    if (Real_SSL_new && Real_SSL_CTX_set_keylog_callback) {
+        DetourAttach(&(PVOID&)Real_SSL_new, Mine_SSL_new);
+        LOG_INFO(L"SSL", L"Attached to SSL_new for keylog-only strategy");
+        EtwTraceMessage(L"Attached to SSL_new (keylog-only strategy).");
         attachedAnySsl = true;
-    }
-    if (Real_SSL_read) {
-        DetourAttach(&(PVOID&)Real_SSL_read, Mine_SSL_read);
-        EtwTraceMessage(L"Attached to SSL_read.");
-        attachedAnySsl = true;
-    }
-    if (Real_SSL_new) { // Hook SSL_new to enable keylogging
-        // Real_SSL_CTX_set_keylog_callback is called by Mine_SSL_new, not hooked itself
-        if (Real_SSL_CTX_set_keylog_callback) {
-            DetourAttach(&(PVOID&)Real_SSL_new, Mine_SSL_new);
-            EtwTraceMessage(L"Attached to SSL_new (for keylogging).");
-            attachedAnySsl = true; // Consider this part of SSL setup
+        
+        // Log if we have SSL_get_servername for better host identification
+        if (Real_SSL_get_servername) {
+            LOG_INFO(L"SSL", L"SSL_get_servername available for host identification");
         } else {
-            EtwTraceMessage(L"SSL_new found, but SSL_CTX_set_keylog_callback not found. Cannot enable keylogging.");
+            LOG_WARN(L"SSL", L"SSL_get_servername not found - hosts will be logged as <unknown>");
         }
-    }
-    // Note: SSL_get_servername is used by Mine_SSL_write/read, not hooked itself.
-    if (!Real_SSL_get_servername && (Real_SSL_write || Real_SSL_read)) {
-         EtwTraceMessage(L"Warning: SSL_write/read hooked but SSL_get_servername not found. Hostname will be missing.");
+    } else {
+        if (!Real_SSL_new) {
+            LOG_WARN(L"SSL", L"SSL_new not found - cannot enable keylogging");
+            EtwTraceMessage(L"SSL_new not found. Cannot enable keylogging.");
+        }
+        if (!Real_SSL_CTX_set_keylog_callback) {
+            LOG_WARN(L"SSL", L"SSL_CTX_set_keylog_callback not found - cannot enable keylogging");
+            EtwTraceMessage(L"SSL_CTX_set_keylog_callback not found. Cannot enable keylogging.");
+        }
     }
 
     if (attachedAnySsl) {
-        EtwTraceMessage(L"SSL hooks attached.");
+        LOG_INFO(L"SSL", L"SSL keylog-only hooks installed successfully");
+        EtwTraceMessage(L"SSL keylog-only hooks installed.");
         g_sslHooksInstalled = true;
     } else {
-        EtwTraceMessage(L"No SSL functions found/attached. SSL hooks NOT installed.");
+        LOG_WARN(L"SSL", L"No SSL functions attached - keylogging NOT available");
+        EtwTraceMessage(L"No SSL functions found/attached. SSL keylogging NOT available.");
     }
     // DetourTransactionCommit() will be called later in InstallHooks()
 }
@@ -837,16 +788,8 @@ void RemoveHooks() {
     LOG_DEBUG(L"Hooks", L"Detaching LoadLibraryW hook");
     DetourDetach(&(PVOID&)Real_LoadLibraryW, Mine_LoadLibraryW);
 
-    if (Real_SSL_write) {
-        LOG_DEBUG(L"Hooks", L"Detaching SSL_write");
-        DetourDetach(&(PVOID&)Real_SSL_write, Mine_SSL_write);
-    }
-    if (Real_SSL_read) {
-        LOG_DEBUG(L"Hooks", L"Detaching SSL_read");
-        DetourDetach(&(PVOID&)Real_SSL_read, Mine_SSL_read);
-    }
     if (Real_SSL_new) {
-        LOG_DEBUG(L"Hooks", L"Detaching SSL_new");
+        LOG_DEBUG(L"Hooks", L"Detaching SSL_new (keylog-only)");
         DetourDetach(&(PVOID&)Real_SSL_new, Mine_SSL_new);
     }
     
