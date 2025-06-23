@@ -8,5 +8,9 @@
     "cmd.exe",
     "curl.exe",
     "rundll32.exe"
-  ]
+  ],
+  "skip_ssl": [
+    "Code.exe"
+  ],
+  "comment": "Add process names here to skip SSL hooks for those processes. This helps with compatibility issues on Windows on ARM."
 } 

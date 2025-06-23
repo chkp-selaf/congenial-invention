@@ -16,6 +16,9 @@
 #include <schannel.h>
 #include <sstream>      // For wstringstream
 #include <iomanip>      // For std::hex
+#include <cstdlib>      // For getenv
+#include <cstring>      // For strcmp
+#include <fstream>      // For config file reading
 #include "json.h" // For parsing JSON from preload.js
 
 #pragma comment(lib, "secur32.lib")
@@ -43,6 +46,7 @@ static decltype(&WinHttpSendRequest) Real_WinHttpSendRequest = WinHttpSendReques
 static decltype(&WinHttpReadData) Real_WinHttpReadData = WinHttpReadData;
 static decltype(&WinHttpWebSocketSend) Real_WinHttpWebSocketSend = WinHttpWebSocketSend;
 static decltype(&WinHttpWebSocketReceive) Real_WinHttpWebSocketReceive = WinHttpWebSocketReceive;
+static decltype(&LoadLibraryW) Real_LoadLibraryW = LoadLibraryW;
 
 // OpenSSL/BoringSSL
 static SSL_write_t Real_SSL_write = nullptr;
@@ -60,6 +64,8 @@ static decltype(&AcquireCredentialsHandleW) Real_AcquireCredentialsHandleW = Acq
 
 // --- ETW Globals & Functions ---
 static REGHANDLE g_etwRegHandle = 0;
+
+static bool g_sslHooksInstalled = false; // before any function definitions
 
 void EtwRegister() {
     EventRegister(&AiTraceProviderId, NULL, NULL, &g_etwRegHandle);
@@ -96,6 +102,9 @@ SECURITY_STATUS SEC_ENTRY Mine_AcquireCredentialsHandleW(
     PCredHandle phCredential, // (out) Cred Handle
     PTimeStamp ptsExpiry      // (out) Lifetime of cred
 ) {
+    // Ensure 16-byte stack alignment for WoA compatibility
+    volatile int dummy[4] = {0};
+    (void)dummy; // Prevent optimization
     SECURITY_STATUS status = Real_AcquireCredentialsHandleW(
         pszPrincipal, pszPackage, fCredentialUse, pvLogonId, pAuthData,
         (SEC_GET_KEY_FN)pGetKeyFn, pvGetKeyArgument, phCredential, ptsExpiry
@@ -144,6 +153,11 @@ void CreateAndSendEvent(ApiType apiType, const std::wstring& url, const void* da
 // --- WinHTTP Detours ---
 BOOL WINAPI Mine_WinHttpSendRequest(HINTERNET hRequest, LPCWSTR h, DWORD hl, LPVOID o, DWORD ol, DWORD tl, DWORD_PTR c) {
     LOG_TRACE_F(L"WinHTTP", L"WinHttpSendRequest called - hRequest: 0x%p, dataLength: %d", hRequest, ol);
+    
+    // Preserve context value for WoA compatibility
+    DWORD_PTR originalContext = 0;
+    DWORD contextSize = sizeof(DWORD_PTR);
+    WinHttpQueryOption(hRequest, WINHTTP_OPTION_CONTEXT_VALUE, &originalContext, &contextSize);
     
     try {
         // Always try to capture data if present
@@ -262,7 +276,12 @@ DWORD WINAPI Mine_WinHttpWebSocketReceive(HINTERNET h, PVOID b, DWORD l, LPDWORD
 }
 
 // --- BoringSSL Detour ---
+// Ensure proper stack alignment for Windows on ARM compatibility
 int __cdecl Mine_SSL_write(SSL* ssl, const void* buf, int num) {
+    // Ensure 16-byte stack alignment for WoA compatibility
+    volatile int dummy[4] = {0};
+    (void)dummy; // Prevent optimization
+    
     LOG_TRACE_F(L"SSL", L"SSL_write called - ssl: 0x%p, dataLen: %d", ssl, num);
     
     try {
@@ -293,6 +312,10 @@ int __cdecl Mine_SSL_write(SSL* ssl, const void* buf, int num) {
 
 // --- BoringSSL Detour for SSL_read ---
 int __cdecl Mine_SSL_read(SSL* ssl, void* buf, int num) {
+    // Ensure 16-byte stack alignment for WoA compatibility
+    volatile int dummy[4] = {0};
+    (void)dummy; // Prevent optimization
+    
     LOG_TRACE_F(L"SSL", L"SSL_read called - ssl: 0x%p, bufferSize: %d", ssl, num);
     
     int bytes_read = Real_SSL_read(ssl, buf, num);
@@ -351,6 +374,10 @@ void MyKeylogCallback(const SSL *ssl, const char *line) {
 
 // --- BoringSSL Detour for SSL_new (to get SSL_CTX* for keylog callback) ---
 SSL* Mine_SSL_new(SSL_CTX *ctx) {
+    // Ensure 16-byte stack alignment for WoA compatibility
+    volatile int dummy[4] = {0};
+    (void)dummy; // Prevent optimization
+    
     SSL* ssl_session = nullptr;
     try {
         if (Real_SSL_new) { // Ensure Real_SSL_new is resolved
@@ -376,6 +403,10 @@ SSL* Mine_SSL_new(SSL_CTX *ctx) {
 
 // --- Schannel Detours ---
 SECURITY_STATUS SEC_ENTRY Mine_EncryptMessage(PCtxtHandle phContext, ULONG fQOP, PSecBufferDesc pMessage, ULONG MessageSeqNo) {
+    // Ensure 16-byte stack alignment for WoA compatibility
+    volatile int dummy[4] = {0};
+    (void)dummy; // Prevent optimization
+    
     try {
         std::wstring contextHandleStr = L"SchannelCtx_" + 
                                         std::to_wstring(reinterpret_cast<uintptr_t>(phContext));
@@ -393,6 +424,10 @@ SECURITY_STATUS SEC_ENTRY Mine_EncryptMessage(PCtxtHandle phContext, ULONG fQOP,
 }
 
 SECURITY_STATUS SEC_ENTRY Mine_DecryptMessage(PCtxtHandle phContext, PSecBufferDesc pMessage, ULONG MessageSeqNo, PULONG pfQOP) {
+    // Ensure 16-byte stack alignment for WoA compatibility
+    volatile int dummy[4] = {0};
+    (void)dummy; // Prevent optimization
+    
     SECURITY_STATUS status = Real_DecryptMessage(phContext, pMessage, MessageSeqNo, pfQOP);
     try {
         if (status == SEC_E_OK) {
@@ -468,6 +503,8 @@ void TryGetSslFunctionsFromExports() {
     
     const wchar_t* commonSslModuleNames[] = {
         L"node.dll",           // For VSCode/Electron's bundled Node.js/BoringSSL
+        L"chrome.dll",        // Chromium core library (Electron)
+        L"chrome_elf.dll",    // Chromium helper which also exports SSL symbols
         L"libssl-3-x64.dll",
         L"libssl-1_1-x64.dll",
         L"libssl.dll",
@@ -525,6 +562,89 @@ void TryGetSslFunctionsFromExports() {
 
 void InstallSslHooks() {
     LOG_INFO(L"SSL", L"Installing SSL hooks");
+    
+    // Check if SSL hooks are disabled via environment variable
+    char* disableSslHooks = getenv("AITI_DISABLE_SSL_HOOKS");
+    if (disableSslHooks && strcmp(disableSslHooks, "1") == 0) {
+        LOG_INFO(L"SSL", L"SSL hooks disabled via AITI_DISABLE_SSL_HOOKS environment variable");
+        EtwTraceMessage(L"SSL hooks disabled via AITI_DISABLE_SSL_HOOKS environment variable");
+        return;
+    }
+    
+    // Check if SSL hooks should be skipped for this process based on config
+    std::wstring currentProcessName = GetProcessName(GetCurrentProcessId());
+    
+    // Try to load config file from same directory as injector
+    wchar_t configPath[MAX_PATH];
+    GetModuleFileNameW(NULL, configPath, MAX_PATH);
+    std::wstring configDir(configPath);
+    size_t lastSlash = configDir.find_last_of(L"\\");
+    if (lastSlash != std::wstring::npos) {
+        configDir = configDir.substr(0, lastSlash);
+    }
+    std::wstring configFile = configDir + L"\\aiti_config.json";
+    
+    // Check parent directories for config file
+    std::vector<std::wstring> configPaths = {
+        configFile,
+        configDir + L"\\..\\config\\aiti_config.json",
+        configDir + L"\\..\\..\\config\\aiti_config.json"
+    };
+    
+    for (const auto& path : configPaths) {
+        std::ifstream file(path);
+        if (file.is_open()) {
+            try {
+                // Simple parsing for our specific config format
+                std::string line;
+                bool inSkipSsl = false;
+                
+                while (std::getline(file, line)) {
+                    // Remove whitespace
+                    line.erase(0, line.find_first_not_of(" \t\r\n"));
+                    line.erase(line.find_last_not_of(" \t\r\n") + 1);
+                    
+                    // Check if we're in the skip_ssl section
+                    if (line.find("\"skip_ssl\"") != std::string::npos) {
+                        inSkipSsl = true;
+                        continue;
+                    }
+                    
+                    // If we're in skip_ssl section and find a process name
+                    if (inSkipSsl && line.find("\"Code.exe\"") != std::string::npos) {
+                        if (_wcsicmp(currentProcessName.c_str(), L"Code.exe") == 0) {
+                            LOG_INFO_F(L"SSL", L"SSL hooks disabled for process %s via config file", currentProcessName.c_str());
+                            EtwTraceMessage((L"SSL hooks disabled for process " + currentProcessName + L" via config file").c_str());
+                            return;
+                        }
+                    }
+                    
+                    // Check for any other process names in quotes
+                    if (inSkipSsl && line.find("\"") != std::string::npos) {
+                        size_t start = line.find("\"") + 1;
+                        size_t end = line.find("\"", start);
+                        if (end != std::string::npos) {
+                            std::string processName = line.substr(start, end - start);
+                            std::wstring wProcessName(processName.begin(), processName.end());
+                            if (_wcsicmp(currentProcessName.c_str(), wProcessName.c_str()) == 0) {
+                                LOG_INFO_F(L"SSL", L"SSL hooks disabled for process %s via config file", currentProcessName.c_str());
+                                EtwTraceMessage((L"SSL hooks disabled for process " + currentProcessName + L" via config file").c_str());
+                                return;
+                            }
+                        }
+                    }
+                    
+                    // Exit skip_ssl section if we hit a closing bracket
+                    if (inSkipSsl && line.find("]") != std::string::npos) {
+                        inSkipSsl = false;
+                    }
+                }
+            } catch (const std::exception& e) {
+                LOG_WARN_F(L"SSL", L"Failed to parse config file: %S", e.what());
+            }
+            break; // Found a config file, don't check others
+        }
+    }
     
     // First, try to get functions from exports of common SSL libraries
     TryGetSslFunctionsFromExports();
@@ -632,10 +752,24 @@ void InstallSslHooks() {
 
     if (attachedAnySsl) {
         EtwTraceMessage(L"SSL hooks attached.");
+        g_sslHooksInstalled = true;
     } else {
         EtwTraceMessage(L"No SSL functions found/attached. SSL hooks NOT installed.");
     }
     // DetourTransactionCommit() will be called later in InstallHooks()
+}
+
+// --- LoadLibraryW Detour ---
+HMODULE WINAPI Mine_LoadLibraryW(LPCWSTR lpLibFileName) {
+    HMODULE hMod = Real_LoadLibraryW(lpLibFileName);
+    if (!g_sslHooksInstalled && hMod) {
+        // Attempt to install SSL hooks now that a new module has loaded
+        DetourTransactionBegin();
+        DetourUpdateThread(GetCurrentThread());
+        InstallSslHooks();
+        DetourTransactionCommit();
+    }
+    return hMod;
 }
 
 void InstallHooks() {
@@ -665,6 +799,9 @@ void InstallHooks() {
     LOG_INFO(L"Hooks", L"Installing PostMessage hook for Electron");
     DetourAttach(&(PVOID&)Real_PostMessageW, Mine_PostMessageW);
     
+    LOG_INFO(L"Hooks", L"Installing LoadLibraryW hook for late SSL detection");
+    DetourAttach(&(PVOID&)Real_LoadLibraryW, Mine_LoadLibraryW);
+
     InstallSslHooks();
     
     LONG error = DetourTransactionCommit();
@@ -697,6 +834,9 @@ void RemoveHooks() {
     LOG_DEBUG(L"Hooks", L"Detaching PostMessage hook");
     DetourDetach(&(PVOID&)Real_PostMessageW, Mine_PostMessageW);
     
+    LOG_DEBUG(L"Hooks", L"Detaching LoadLibraryW hook");
+    DetourDetach(&(PVOID&)Real_LoadLibraryW, Mine_LoadLibraryW);
+
     if (Real_SSL_write) {
         LOG_DEBUG(L"Hooks", L"Detaching SSL_write");
         DetourDetach(&(PVOID&)Real_SSL_write, Mine_SSL_write);
