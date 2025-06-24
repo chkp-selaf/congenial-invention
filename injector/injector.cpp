@@ -51,6 +51,12 @@ static inline void LogInjector(const std::wstring& level, const std::wstring& me
 static std::unordered_set<std::wstring> g_allowList;
 static bool g_configLoaded = false;
 
+// Forward declarations
+static std::wstring GetProcessName(DWORD pid);
+static std::wstring GetProcessCommandLine(DWORD pid);
+static std::wstring GetAbsoluteDllPath();
+static bool InjectIntoProcess(DWORD pid, const wchar_t* dllPath);
+
 // VS Code process detection and handling
 struct VSCodeProcessInfo {
     DWORD pid;
