@@ -849,9 +849,18 @@ bool StartProcessAndInject(const std::wstring& commandLine, const std::wstring& 
     }
     
     bool useManualInjection = false;
-    if (isArm64Host && targetArch == IMAGE_FILE_MACHINE_AMD64) {
-        std::wcout << L"[Injector] x64 process on ARM64 host detected - using manual injection" << std::endl;
-        useManualInjection = true;
+    // Detours has reliability issues on ARM64. We now force the manual
+    // LoadLibraryW injection path for BOTH "x64-on-WoA" *and* pure ARM64
+    // targets to avoid STATUS_INVALID_IMAGE_FORMAT (0xC000007B).
+    if (isArm64Host) {
+        if (targetArch == IMAGE_FILE_MACHINE_AMD64) {
+            std::wcout << L"[Injector] x64 process on ARM64 host detected - using manual injection" << std::endl;
+            useManualInjection = true;
+        }
+        else if (targetArch == IMAGE_FILE_MACHINE_ARM64) {
+            std::wcout << L"[Injector] Native ARM64 target detected - using manual injection to bypass Detours ARM64 issues" << std::endl;
+            useManualInjection = true;
+        }
     }
     
     if (!useManualInjection) {

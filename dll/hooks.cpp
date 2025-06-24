@@ -971,10 +971,22 @@ void InstallHooks() {
     DetourAttach(&(PVOID&)Real_WinHttpWebSocketSend, Mine_WinHttpWebSocketSend);
     DetourAttach(&(PVOID&)Real_WinHttpWebSocketReceive, Mine_WinHttpWebSocketReceive);
     
-    LOG_INFO(L"Hooks", L"Installing Schannel hooks");
-    DetourAttach(&(PVOID&)Real_EncryptMessage, Mine_EncryptMessage);
-    DetourAttach(&(PVOID&)Real_DecryptMessage, Mine_DecryptMessage);
-    DetourAttach(&(PVOID&)Real_AcquireCredentialsHandleW, Mine_AcquireCredentialsHandleW);
+    // Optional: allow disabling Schannel detours via environment variable
+    bool disableSchannel = false;
+    char* envDisableSch = getenv("AITI_DISABLE_SCHANNEL_HOOKS");
+    if (envDisableSch && strcmp(envDisableSch, "1") == 0) {
+        disableSchannel = true;
+        LOG_INFO(L"Hooks", L"Schannel hooks disabled via AITI_DISABLE_SCHANNEL_HOOKS");
+    }
+
+    if (!disableSchannel) {
+        LOG_INFO(L"Hooks", L"Installing Schannel hooks");
+        DetourAttach(&(PVOID&)Real_EncryptMessage, Mine_EncryptMessage);
+        DetourAttach(&(PVOID&)Real_DecryptMessage, Mine_DecryptMessage);
+        DetourAttach(&(PVOID&)Real_AcquireCredentialsHandleW, Mine_AcquireCredentialsHandleW);
+    } else {
+        LOG_INFO(L"Hooks", L"Skipping Schannel hooks as requested");
+    }
     
     LOG_INFO(L"Hooks", L"Installing PostMessage hook for Electron");
     DetourAttach(&(PVOID&)Real_PostMessageW, Mine_PostMessageW);
