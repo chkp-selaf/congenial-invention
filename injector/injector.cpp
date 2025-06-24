@@ -25,7 +25,7 @@
 #endif
 
 // Simple logging for injector
-static void LogInjector(const std::wstring& level, const std::wstring& message) {
+static void LogAndDebug(const std::wstring& level, const std::wstring& message) {
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);
     
@@ -34,13 +34,17 @@ static void LogInjector(const std::wstring& level, const std::wstring& message) 
     localtime_s(&timeinfo, &time_t);
     wcsftime(timeBuffer, sizeof(timeBuffer) / sizeof(wchar_t), L"%Y-%m-%d %H:%M:%S", &timeinfo);
     
-    std::wcout << L"[" << timeBuffer << L"] [" << level << L"] " << message << std::endl;
-    std::wcout.flush();
+    std::wstringstream finalMsg;
+    finalMsg << L"[" << timeBuffer << L"] [AI-Injector] [" << level << L"] " << message;
     
-    // Also log to debug output
-    std::wstringstream debugMsg;
-    debugMsg << L"[AI-Injector] [" << level << L"] " << message;
-    OutputDebugStringW(debugMsg.str().c_str());
+    std::wcout << finalMsg.str() << std::endl;
+    std::wcout.flush();
+    OutputDebugStringW(finalMsg.str().c_str());
+}
+
+// After definition of LogAndDebug, add alias function
+static inline void LogInjector(const std::wstring& level, const std::wstring& message) {
+    LogAndDebug(level, message);
 }
 
 // --- Globals for Configuration ---
@@ -451,14 +455,14 @@ static bool InjectIntoProcess(DWORD pid, const wchar_t* dllPath) {
     // --- Allow-list Check ---
     if (g_configLoaded && !g_allowList.empty()) {
         if (g_allowList.find(processName) == g_allowList.end()) {
-            LogInjector(L"INFO", L"Skipping non-allowed process: " + processName);
+            LogAndDebug(L"INFO", L"Skipping non-allowed process: " + processName);
             std::wcout << L"[Injector] Skipping non-allowed process: " << processName << std::endl;
             return false; // Not an error, just skipping
         }
     }
     
-    LogInjector(L"INFO", L"Attempting injection into PID " + std::to_wstring(pid) + L" (" + processName + L")");
-    LogInjector(L"DEBUG", L"Using DLL: " + std::wstring(dllPath));
+    LogAndDebug(L"INFO", L"Attempting injection into PID " + std::to_wstring(pid) + L" (" + processName + L")");
+    LogAndDebug(L"DEBUG", L"Using DLL: " + std::wstring(dllPath));
     
     std::wcout << L"[Injector] Attempting injection into PID " << pid << L" (" << processName << L")" << std::endl;
     std::wcout << L"[Injector] Using DLL: " << dllPath << std::endl;
@@ -466,7 +470,7 @@ static bool InjectIntoProcess(DWORD pid, const wchar_t* dllPath) {
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
     if (!hProcess) {
         DWORD error = GetLastError();
-        LogInjector(L"ERROR", L"Failed to open process " + std::to_wstring(pid) + L": " + std::to_wstring(error));
+        LogAndDebug(L"ERROR", L"Failed to open process " + std::to_wstring(pid) + L": " + std::to_wstring(error));
         std::wcerr << L"[Injector] Failed to open process " << pid << L": " << error << std::endl;
         return false;
     }
@@ -474,23 +478,23 @@ static bool InjectIntoProcess(DWORD pid, const wchar_t* dllPath) {
     // Check process architecture
     WORD targetArch = GetProcessArchitecture(hProcess);
     if (targetArch != 0) {
-        LogInjector(L"DEBUG", L"Target process architecture: " + std::wstring(MachineTypeToString(targetArch).begin(), MachineTypeToString(targetArch).end()));
+        LogAndDebug(L"DEBUG", L"Target process architecture: " + std::wstring(MachineTypeToString(targetArch).begin(), MachineTypeToString(targetArch).end()));
     }
 
     char dllPathA[MAX_PATH];
     WideCharToMultiByte(CP_ACP, 0, dllPath, -1, dllPathA, MAX_PATH, nullptr, nullptr);
     const char* dlls[] = { dllPathA };
     
-    LogInjector(L"DEBUG", L"Calling DetourUpdateProcessWithDll...");
+    LogAndDebug(L"DEBUG", L"Calling DetourUpdateProcessWithDll...");
     BOOL ok = DetourUpdateProcessWithDll(hProcess, dlls, 1);
     DWORD detourError = GetLastError();
     CloseHandle(hProcess);
     
     if (ok) {
-        LogInjector(L"INFO", L"✓ Successfully injected into PID " + std::to_wstring(pid) + L" (" + processName + L")");
+        LogAndDebug(L"INFO", L"✓ Successfully injected into PID " + std::to_wstring(pid) + L" (" + processName + L")");
         std::wcout << L"[Injector] ✓ Successfully injected into PID " << pid << L" (" << processName << L")" << std::endl;
     } else {
-        LogInjector(L"ERROR", L"✗ Failed to inject into PID " + std::to_wstring(pid) + L" (" + processName + L"): " + std::to_wstring(detourError));
+        LogAndDebug(L"ERROR", L"✗ Failed to inject into PID " + std::to_wstring(pid) + L" (" + processName + L"): " + std::to_wstring(detourError));
         std::wcerr << L"[Injector] ✗ Failed to inject into PID " << pid << L" (" << processName << L"): " << detourError << std::endl;
     }
     
@@ -740,10 +744,11 @@ bool StartProcessAndInject(const std::wstring& commandLine, const std::wstring& 
     
     // Check for architecture mismatch before even launching
     if (injectorArch != 0 && targetArch != IMAGE_FILE_MACHINE_UNKNOWN && targetArch != 0 && injectorArch != targetArch) {
-        std::wcerr << L"\n[Injector] ✗ CRITICAL: Architecture mismatch detected before launch!" << std::endl;
-        std::wcerr << L"  Injector : " << MachineTypeToString(injectorArch).c_str() << std::endl;
-        std::wcerr << L"  Target   : " << MachineTypeToString(targetArch).c_str() << std::endl;
-        std::wcerr << L"  Build the injector / DLL for the same architecture." << std::endl;
+        std::wstring archMismatchMsg = L"CRITICAL: Architecture mismatch detected before launch! Injector: " +
+            std::wstring(MachineTypeToString(injectorArch).begin(), MachineTypeToString(injectorArch).end()) +
+            L", Target: " + std::wstring(MachineTypeToString(targetArch).begin(), MachineTypeToString(targetArch).end()) +
+            L". Build the injector / DLL for the same architecture.";
+        LogAndDebug(L"ERROR", archMismatchMsg);
         return false;
     }
 
@@ -756,18 +761,15 @@ bool StartProcessAndInject(const std::wstring& commandLine, const std::wstring& 
     if (!CreateProcessW(nullptr, const_cast<LPWSTR>(commandLine.c_str()), nullptr, nullptr,
                         FALSE, CREATE_SUSPENDED, nullptr, nullptr, &si, &pi)) {
         DWORD err = GetLastError();
-        std::wcerr << L"[Injector] CreateProcess failed with error " << err << L" (" << Win32ErrorMessage(err) << L")" << std::endl;
-        std::wcerr.flush();
+        LogAndDebug(L"ERROR", L"CreateProcess failed with error " + std::to_wstring(err) + L" (" + Win32ErrorMessage(err) + L")");
         LogCreateProcessDiagnostics(commandLine, err);
         return false;
     }
 
-    std::wcout << L"[Injector] Process created with PID " << pi.dwProcessId << L", verifying architecture..." << std::endl;
-    std::wcout.flush();
+    LogAndDebug(L"INFO", L"Process created with PID " + std::to_wstring(pi.dwProcessId) + L", verifying architecture...");
     
     // Add a small delay to let the process initialize
-    std::wcout << L"[Injector] Waiting for process initialization..." << std::endl;
-    std::wcout.flush();
+    LogAndDebug(L"DEBUG", L"Waiting for process initialization...");
     Sleep(100); // 100ms delay
     
     // === Architecture Mismatch Check – refuse to continue if injector and target don't match ===
@@ -793,10 +795,11 @@ bool StartProcessAndInject(const std::wstring& commandLine, const std::wstring& 
         && targetArch  != 0                             // and it's valid
         && injectorArch != targetArch)                  // mismatch → abort
     {
-        std::wcerr << L"\n[Injector] ✗ CRITICAL: Architecture mismatch!" << std::endl;
-        std::wcerr << L"  Injector : " << MachineTypeToString(injectorArch).c_str() << std::endl;
-        std::wcerr << L"  Target   : " << MachineTypeToString(targetArch ).c_str() << std::endl;
-        std::wcerr << L"  Build the injector / DLL for the same architecture (use -A ARM64 for ARM native, -A x64 for emulated x64)." << std::endl;
+        std::wstring archMismatchMsg = L"CRITICAL: Architecture mismatch! Injector: " +
+            std::wstring(MachineTypeToString(injectorArch).begin(), MachineTypeToString(injectorArch).end()) +
+            L", Target: " + std::wstring(MachineTypeToString(targetArch).begin(), MachineTypeToString(targetArch).end()) +
+            L". Build the injector / DLL for the same architecture (use -A ARM64 for ARM native, -A x64 for emulated x64).";
+        LogAndDebug(L"ERROR", archMismatchMsg);
 
         TerminateProcess(pi.hProcess, 1);
         CloseHandle(pi.hThread);
@@ -808,10 +811,9 @@ bool StartProcessAndInject(const std::wstring& commandLine, const std::wstring& 
     std::wstring absoluteDllPath = GetAbsoluteDllPath();
 
     if (!std::filesystem::exists(absoluteDllPath)) {
-        std::wcerr << L"[Injector] ✗ CRITICAL: DLL not found at path: " << absoluteDllPath << std::endl;
-        std::wcerr << L"[Injector] This path is calculated relative to the injector's location." << std::endl;
-        std::wcerr << L"[Injector] Please ensure 'ai_hook.dll' exists and the build process places it correctly." << std::endl;
-        std::wcerr.flush();
+        LogAndDebug(L"ERROR", L"CRITICAL: DLL not found at path: " + absoluteDllPath);
+        LogAndDebug(L"ERROR", L"This path is calculated relative to the injector's location.");
+        LogAndDebug(L"ERROR", L"Please ensure 'ai_hook.dll' exists and the build process places it correctly.");
         TerminateProcess(pi.hProcess, 1);
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
@@ -831,20 +833,23 @@ bool StartProcessAndInject(const std::wstring& commandLine, const std::wstring& 
     IsWow64Process2_t pIsWow64Process2 = (IsWow64Process2_t)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsWow64Process2");
     
     if (pIsWow64Process2 && pIsWow64Process2(GetCurrentProcess(), &processMachine, &nativeMachine)) {
-        std::wcout << L"[DEBUG] Current process: processMachine=0x" << std::hex << processMachine 
-                   << L", nativeMachine=0x" << nativeMachine << std::dec << std::endl;
+        std::wstringstream msg;
+        msg << L"Current process: processMachine=0x" << std::hex << processMachine << L", nativeMachine=0x" << nativeMachine << std::dec;
+        LogAndDebug(L"DEBUG", msg.str());
         if (nativeMachine == IMAGE_FILE_MACHINE_ARM64) {
             isArm64Host = true;
-            std::wcout << L"[Injector] Running on ARM64 Windows (detected via IsWow64Process2)" << std::endl;
+            LogAndDebug(L"INFO", L"Running on ARM64 Windows (detected via IsWow64Process2)");
         }
     } else {
         // Fallback to GetNativeSystemInfo
         SYSTEM_INFO sysInfo;
         GetNativeSystemInfo(&sysInfo);
-        std::wcout << L"[DEBUG] Native system architecture (fallback): " << sysInfo.wProcessorArchitecture << std::endl;
+        std::wstringstream msg;
+        msg << L"Native system architecture (fallback): " << sysInfo.wProcessorArchitecture;
+        LogAndDebug(L"DEBUG", msg.str());
         if (sysInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_ARM64) {
             isArm64Host = true;
-            std::wcout << L"[Injector] Running on ARM64 Windows (detected via GetNativeSystemInfo)" << std::endl;
+            LogAndDebug(L"INFO", L"Running on ARM64 Windows (detected via GetNativeSystemInfo)");
         }
     }
     
@@ -854,11 +859,11 @@ bool StartProcessAndInject(const std::wstring& commandLine, const std::wstring& 
     // targets to avoid STATUS_INVALID_IMAGE_FORMAT (0xC000007B).
     if (isArm64Host) {
         if (targetArch == IMAGE_FILE_MACHINE_AMD64) {
-            std::wcout << L"[Injector] x64 process on ARM64 host detected - using manual injection" << std::endl;
+            LogAndDebug(L"INFO", L"x64 process on ARM64 host detected - using manual injection");
             useManualInjection = true;
         }
         else if (targetArch == IMAGE_FILE_MACHINE_ARM64) {
-            std::wcout << L"[Injector] Native ARM64 target detected - using manual injection to bypass Detours ARM64 issues" << std::endl;
+            LogAndDebug(L"INFO", L"Native ARM64 target detected - using manual injection to bypass Detours ARM64 issues");
             useManualInjection = true;
         }
     }
@@ -868,8 +873,7 @@ bool StartProcessAndInject(const std::wstring& commandLine, const std::wstring& 
         WideCharToMultiByte(CP_ACP, 0, absoluteDllPath.c_str(), -1, dllPathA, MAX_PATH, nullptr, nullptr);
         const char* dlls[] = { dllPathA };
         
-        std::wcout << L"[Injector] Calling DetourUpdateProcessWithDll..." << std::endl;
-        std::wcout.flush();
+        LogAndDebug(L"INFO", L"Calling DetourUpdateProcessWithDll...");
         
         // Set last error to 0 to ensure we get the real error
         SetLastError(0);
@@ -877,24 +881,22 @@ bool StartProcessAndInject(const std::wstring& commandLine, const std::wstring& 
         BOOL detourResult = DetourUpdateProcessWithDll(pi.hProcess, dlls, 1);
         DWORD detourError = GetLastError();
         
-        std::wcout << L"[Injector] DetourUpdateProcessWithDll returned: " << (detourResult ? L"TRUE" : L"FALSE") 
-                  << L", GetLastError: " << detourError << std::endl;
-        std::wcout.flush();
+        std::wstringstream detourMsg;
+        detourMsg << L"DetourUpdateProcessWithDll returned: " << (detourResult ? L"TRUE" : L"FALSE") 
+                  << L", GetLastError: " << detourError;
+        LogAndDebug(L"DEBUG", detourMsg.str());
         
         if (!detourResult) {
-            std::wcerr << L"[Injector] DetourUpdateProcessWithDll failed with error: " << detourError << L" (" << Win32ErrorMessage(detourError) << L")" << std::endl;
-            std::wcerr.flush();
+            LogAndDebug(L"ERROR", L"DetourUpdateProcessWithDll failed with error: " + std::to_wstring(detourError) + L" (" + Win32ErrorMessage(detourError) + L")");
             
             // Check if DLL exists and is accessible
             HMODULE testLoad = LoadLibraryExW(absoluteDllPath.c_str(), NULL, DONT_RESOLVE_DLL_REFERENCES);
             if (testLoad) {
-                std::wcerr << L"[Injector] DLL can be loaded locally, issue might be with target process" << std::endl;
-                std::wcerr.flush();
+                LogAndDebug(L"DEBUG", L"DLL can be loaded locally, issue might be with target process");
                 FreeLibrary(testLoad);
             } else {
                 DWORD loadError = GetLastError();
-                std::wcerr << L"[Injector] DLL cannot be loaded locally, error: " << loadError << L" (" << Win32ErrorMessage(loadError) << L")" << std::endl;
-                std::wcerr.flush();
+                LogAndDebug(L"ERROR", L"DLL cannot be loaded locally, error: " + std::to_wstring(loadError) + L" (" + Win32ErrorMessage(loadError) + L")");
             }
             
             TerminateProcess(pi.hProcess, 1);
@@ -904,18 +906,16 @@ bool StartProcessAndInject(const std::wstring& commandLine, const std::wstring& 
         }
     } else {
         // Use manual injection for x64 on ARM64
-        std::wcout << L"[Injector] Resuming process for manual injection..." << std::endl;
+        LogAndDebug(L"INFO", L"Resuming process for manual injection...");
         ResumeThread(pi.hThread);
         
         // Give process time to initialize
         Sleep(500);
         
         if (InjectDllManually(pi.hProcess, absoluteDllPath.c_str())) {
-            std::wcout << L"[Injector] ✓ Manual injection successful!" << std::endl;
-            std::wcout.flush();
+            LogAndDebug(L"INFO", L"✓ Manual injection successful!");
         } else {
-            std::wcerr << L"[Injector] ✗ Manual injection failed" << std::endl;
-            std::wcerr.flush();
+            LogAndDebug(L"ERROR", L"✗ Manual injection failed");
             TerminateProcess(pi.hProcess, 1);
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
@@ -924,35 +924,33 @@ bool StartProcessAndInject(const std::wstring& commandLine, const std::wstring& 
     }
 
     if (!useManualInjection) {
-        std::wcout << L"[Injector] ✓ Main process injection successful, resuming..." << std::endl;
-        std::wcout.flush();
+        LogAndDebug(L"INFO", L"✓ Main process injection successful, resuming...");
         ResumeThread(pi.hThread);
     }
     
     // Wait a bit to see if the process stays alive
-    std::wcout << L"[Injector] Waiting for process to initialize with DLL..." << std::endl;
-    std::wcout.flush();
+    LogAndDebug(L"INFO", L"Waiting for process to initialize with DLL...");
     Sleep(1000);
     
     // Check if process is still alive
     DWORD exitCode;
     if (GetExitCodeProcess(pi.hProcess, &exitCode)) {
         if (exitCode != STILL_ACTIVE) {
-            std::wcerr << L"[Injector] Process exited with code: " << exitCode << L" (0x" << std::hex << exitCode << std::dec << L")" << std::endl;
-            std::wcerr.flush();
+            std::wstringstream exitMsg;
+            exitMsg << L"Process exited with code: " << exitCode << L" (0x" << std::hex << exitCode << std::dec << L")";
+            LogAndDebug(L"ERROR", exitMsg.str());
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
             return false;
         } else {
-            std::wcout << L"[Injector] Process is still running after injection" << std::endl;
-            std::wcout.flush();
+            LogAndDebug(L"INFO", L"Process is still running after injection");
         }
     }
     
     if (waitForExit) {
-        std::wcout << L"[Injector] Waiting for process to exit..." << std::endl;
+        LogAndDebug(L"INFO", L"Waiting for process to exit...");
         WaitForSingleObject(pi.hProcess, INFINITE);
-        std::wcout << L"[Injector] Process has exited" << std::endl;
+        LogAndDebug(L"INFO", L"Process has exited");
     }
     
     CloseHandle(pi.hThread);
@@ -961,9 +959,9 @@ bool StartProcessAndInject(const std::wstring& commandLine, const std::wstring& 
 }
 
 int wmain(int argc, wchar_t* argv[]) {
-    LogInjector(L"INFO", L"=== AI Traffic Injector Starting ===");
-    LogInjector(L"INFO", L"Version: 1.0.0");
-    LogInjector(L"DEBUG", L"Command line args: " + std::to_wstring(argc));
+    LogAndDebug(L"INFO", L"=== AI Traffic Injector Starting ===");
+    LogAndDebug(L"INFO", L"Version: 1.0.0");
+    LogAndDebug(L"DEBUG", L"Command line args: " + std::to_wstring(argc));
     
     if (argc < 2) {
         LogInjector(L"ERROR", L"Invalid arguments");
@@ -984,10 +982,9 @@ int wmain(int argc, wchar_t* argv[]) {
     if (std::wstring_view(argv[1]) == L"--with-children") {
         withChildren = true;
         firstCmdArg = 2;
-        LogInjector(L"INFO", L"Child process monitoring enabled");
+        LogAndDebug(L"INFO", L"Child process monitoring enabled");
         if (argc < 3) {
-            LogInjector(L"ERROR", L"Expected command line after --with-children");
-            std::wcerr << L"Expected command line after --with-children" << std::endl;
+            LogAndDebug(L"ERROR", L"Expected command line after --with-children");
             return 1;
         }
     }
@@ -1039,13 +1036,12 @@ int wmain(int argc, wchar_t* argv[]) {
     // Launch main process and inject
     DWORD mainPid = 0;
     if (!StartProcessAndInject(final_cmdline, GetAbsoluteDllPath(), true, withChildren)) {
-        std::wcerr << L"[Injector] ✗ Failed to start and inject into the main process." << std::endl;
-        std::wcerr.flush();
+        LogAndDebug(L"ERROR", L"Failed to start and inject into the main process.");
         return 1;
     }
 
     if (!withChildren) {
-        std::wcout << L"[Injector] Main process launched successfully. Not monitoring children." << std::endl;
+        LogAndDebug(L"INFO", L"Main process launched successfully. Not monitoring children.");
         return 0;
     }
 
@@ -1054,7 +1050,7 @@ int wmain(int argc, wchar_t* argv[]) {
     constexpr int kWatchSeconds = 30;
     constexpr int kPollIntervalMs = 1000;
 
-    std::wcout << L"[Injector] Monitoring for child processes for " << kWatchSeconds << L" seconds..." << std::endl;
+    LogAndDebug(L"INFO", L"Monitoring for child processes for " + std::to_wstring(kWatchSeconds) + L" seconds...");
 
     auto injectDescendants = [&](DWORD rootPid) {
         std::vector<DWORD> queue{ rootPid };
@@ -1070,7 +1066,7 @@ int wmain(int argc, wchar_t* argv[]) {
                     bool isUtility = cmd.find(L"--type=utility") != std::wstring::npos || cmd.find(L"--type=gpu") != std::wstring::npos;
 
                     if (isUtility) {
-                        std::wcout << L"[Injector] Skipping utility process PID " << kid << std::endl;
+                        LogAndDebug(L"INFO", L"Skipping utility process PID " + std::to_wstring(kid));
                         continue;
                     }
 
@@ -1079,7 +1075,7 @@ int wmain(int argc, wchar_t* argv[]) {
                             // Success logged inside
                         }
                     } else {
-                        std::wcout << L"[Injector] Skipping unrelated child PID " << kid << std::endl;
+                        LogAndDebug(L"INFO", L"Skipping unrelated child PID " + std::to_wstring(kid));
                     }
                 }
                 queue.push_back(kid);
@@ -1096,7 +1092,7 @@ int wmain(int argc, wchar_t* argv[]) {
         
         // Log progress every 5 seconds or when child count changes
         if (elapsed % 5000 == 0 || injected.size() != lastChildCount) {
-            std::wcout << L"[Injector] " << elapsed/1000 << L"s elapsed, " << injected.size() << L" processes injected" << std::endl;
+            LogAndDebug(L"INFO", std::to_wstring(elapsed/1000) + L"s elapsed, " + std::to_wstring(injected.size()) + L" processes injected");
             lastChildCount = injected.size();
         }
         
@@ -1104,6 +1100,6 @@ int wmain(int argc, wchar_t* argv[]) {
         elapsed += kPollIntervalMs;
     }
     
-    std::wcout << L"[Injector] Monitoring complete. Total processes injected: " << injected.size() << std::endl;
+    LogAndDebug(L"INFO", L"Monitoring complete. Total processes injected: " + std::to_wstring(injected.size()));
     return 0;
 }
