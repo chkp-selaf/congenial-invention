@@ -47,6 +47,149 @@ static void LogInjector(const std::wstring& level, const std::wstring& message) 
 static std::unordered_set<std::wstring> g_allowList;
 static bool g_configLoaded = false;
 
+// VS Code process detection and handling
+struct VSCodeProcessInfo {
+    DWORD pid;
+    std::wstring name;
+    std::wstring commandLine;
+    bool isMainProcess;
+    bool isRenderer;
+    bool isExtensionHost;
+    bool isWorker;
+};
+
+// Helper to detect VS Code family processes
+bool IsVSCodeFamily(const std::wstring& processName) {
+    std::vector<std::wstring> vscodeNames = {
+        L"Code.exe",
+        L"Code - Insiders.exe", 
+        L"VSCode.exe",
+        L"code.exe",
+        L"VSCodium.exe",
+        L"cursor.exe",          // Cursor editor (VS Code fork)
+        L"windsurf.exe"         // Windsurf editor (VS Code fork)
+    };
+    
+    for (const auto& name : vscodeNames) {
+        if (_wcsicmp(processName.c_str(), name.c_str()) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Enhanced VS Code process classification
+VSCodeProcessInfo ClassifyVSCodeProcess(DWORD pid) {
+    VSCodeProcessInfo info = {};
+    info.pid = pid;
+    info.name = GetProcessName(pid);
+    info.commandLine = GetProcessCommandLine(pid);
+    
+    // Classify based on command line arguments
+    if (info.commandLine.find(L"--type=renderer") != std::wstring::npos) {
+        info.isRenderer = true;
+        LogInjector(L"DEBUG", L"Detected VS Code renderer process: PID " + std::to_wstring(pid));
+    }
+    else if (info.commandLine.find(L"--type=extensionHost") != std::wstring::npos ||
+             info.commandLine.find(L"--type=extension-host") != std::wstring::npos) {
+        info.isExtensionHost = true;
+        LogInjector(L"DEBUG", L"Detected VS Code extension host: PID " + std::to_wstring(pid));
+    }
+    else if (info.commandLine.find(L"--type=") != std::wstring::npos) {
+        // Other worker process types (utility, gpu, etc.)
+        info.isWorker = true;
+        LogInjector(L"DEBUG", L"Detected VS Code worker process: PID " + std::to_wstring(pid));
+    }
+    else if (IsVSCodeFamily(info.name)) {
+        // Main VS Code process (no --type argument)
+        info.isMainProcess = true;
+        LogInjector(L"DEBUG", L"Detected VS Code main process: PID " + std::to_wstring(pid));
+    }
+    
+    return info;
+}
+
+// Find all VS Code related processes on the system
+std::vector<VSCodeProcessInfo> FindAllVSCodeProcesses() {
+    std::vector<VSCodeProcessInfo> vscodeProcesses;
+    
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE) {
+        LogInjector(L"ERROR", L"Failed to create process snapshot");
+        return vscodeProcesses;
+    }
+    
+    PROCESSENTRY32W pe = {};
+    pe.dwSize = sizeof(pe);
+    
+    if (!Process32FirstW(hSnapshot, &pe)) {
+        CloseHandle(hSnapshot);
+        LogInjector(L"ERROR", L"Failed to enumerate processes");
+        return vscodeProcesses;
+    }
+    
+    do {
+        if (IsVSCodeFamily(pe.szExeFile)) {
+            VSCodeProcessInfo info = ClassifyVSCodeProcess(pe.th32ProcessID);
+            if (info.isMainProcess || info.isRenderer || info.isExtensionHost) {
+                vscodeProcesses.push_back(info);
+                LogInjector(L"INFO", L"Found VS Code process: " + std::wstring(pe.szExeFile) + 
+                           L" (PID: " + std::to_wstring(pe.th32ProcessID) + L")");
+            }
+        }
+    } while (Process32NextW(hSnapshot, &pe));
+    
+    CloseHandle(hSnapshot);
+    return vscodeProcesses;
+}
+
+// Inject into all relevant VS Code processes
+int InjectAllVSCodeProcesses() {
+    LogInjector(L"INFO", L"=== VS Code Multi-Process Injection Mode ===");
+    
+    auto vscodeProcesses = FindAllVSCodeProcesses();
+    if (vscodeProcesses.empty()) {
+        LogInjector(L"WARN", L"No VS Code processes found running");
+        return 1;
+    }
+    
+    LogInjector(L"INFO", L"Found " + std::to_wstring(vscodeProcesses.size()) + L" VS Code processes");
+    
+    int successCount = 0;
+    std::wstring dllPath = GetAbsoluteDllPath();
+    
+    // Prioritize injection order: Main -> Extension Host -> Renderer
+    std::sort(vscodeProcesses.begin(), vscodeProcesses.end(), 
+              [](const VSCodeProcessInfo& a, const VSCodeProcessInfo& b) {
+                  if (a.isMainProcess != b.isMainProcess) return a.isMainProcess;
+                  if (a.isExtensionHost != b.isExtensionHost) return a.isExtensionHost;
+                  return a.isRenderer;
+              });
+    
+    for (const auto& process : vscodeProcesses) {
+        std::wstring processType = L"Unknown";
+        if (process.isMainProcess) processType = L"Main";
+        else if (process.isExtensionHost) processType = L"Extension Host";
+        else if (process.isRenderer) processType = L"Renderer";
+        else if (process.isWorker) processType = L"Worker";
+        
+        LogInjector(L"INFO", L"Injecting into " + processType + L" process: " + 
+                   process.name + L" (PID: " + std::to_wstring(process.pid) + L")");
+        
+        if (InjectIntoProcess(process.pid, dllPath.c_str())) {
+            successCount++;
+            LogInjector(L"INFO", L"✓ Successfully injected into " + processType + L" process");
+        } else {
+            LogInjector(L"ERROR", L"✗ Failed to inject into " + processType + L" process");
+        }
+    }
+    
+    LogInjector(L"INFO", L"Injection complete: " + std::to_wstring(successCount) + L"/" + 
+               std::to_wstring(vscodeProcesses.size()) + L" processes injected successfully");
+    
+    return successCount > 0 ? 0 : 1;
+}
+
 // Helper to get a descriptive string for a machine architecture type
 static std::string MachineTypeToString(WORD machine) {
     switch (machine) {
@@ -815,11 +958,17 @@ int wmain(int argc, wchar_t* argv[]) {
     
     if (argc < 2) {
         LogInjector(L"ERROR", L"Invalid arguments");
-        std::wcerr << L"Usage: ai_injector [--with-children] <command line>" << std::endl;
+        std::wcerr << L"Usage: ai_injector [--with-children] [--vscode] <command line>" << std::endl;
+        std::wcerr << L"       ai_injector --vscode (inject into all running VS Code processes)" << std::endl;
         return 1;
     }
 
     LoadConfig(); // Load the allow-list at startup
+
+    // Check for --vscode flag (inject into all running VS Code processes)
+    if (std::wstring_view(argv[1]) == L"--vscode") {
+        return InjectAllVSCodeProcesses();
+    }
 
     bool withChildren = false;
     int firstCmdArg = 1;
@@ -832,6 +981,11 @@ int wmain(int argc, wchar_t* argv[]) {
             std::wcerr << L"Expected command line after --with-children" << std::endl;
             return 1;
         }
+    }
+    
+    // Check for --vscode flag after --with-children
+    if (firstCmdArg < argc && std::wstring_view(argv[firstCmdArg]) == L"--vscode") {
+        return InjectAllVSCodeProcesses();
     }
 
     // The executable path is the first argument after options.

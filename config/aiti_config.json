@@ -3,6 +3,11 @@
     "python.exe",
     "node.exe",
     "Code.exe",
+    "Code - Insiders.exe",
+    "VSCode.exe",
+    "VSCodium.exe",
+    "cursor.exe",
+    "windsurf.exe",
     "powershell.exe",
     "pwsh.exe",
     "cmd.exe",
@@ -12,5 +17,41 @@
   "skip_ssl": [
     "Code.exe"
   ],
-  "comment": "Add process names here to skip SSL hooks for those processes. This helps with compatibility issues on Windows on ARM."
+  "electron": {
+    "enhanced_detection": true,
+    "boringssl_support": true,
+    "multi_process_injection": true,
+    "process_types": {
+      "main": { "hook_ssl": true, "hook_winhttp": true },
+      "renderer": { "hook_ssl": true, "hook_winhttp": true },
+      "extension_host": { "hook_ssl": true, "hook_winhttp": true },
+      "worker": { "hook_ssl": false, "hook_winhttp": false }
+    }
+  },
+  "vscode": {
+    "auto_detect_processes": true,
+    "supported_variants": [
+      "Code.exe",
+      "Code - Insiders.exe", 
+      "VSCode.exe",
+      "VSCodium.exe",
+      "cursor.exe",
+      "windsurf.exe"
+    ],
+    "force_boringssl_patterns": true
+  },
+  "ssl": {
+    "keylog_only_strategy": true,
+    "fallback_to_full_hooks": false,
+    "boringssl_modules": [
+      "chrome.dll",
+      "chrome_child.dll",
+      "node.dll",
+      "electron.exe",
+      "v8.dll",
+      "ffmpeg.dll",
+      "libnode.dll"
+    ]
+  },
+  "comment": "Enhanced configuration for VS Code/Electron application interception with BoringSSL support"
 } 

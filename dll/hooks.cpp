@@ -462,11 +462,124 @@ std::wstring GetProcessName(DWORD pid) {
     return fullPath.empty() ? L"<unknown>" : fullPath;
 }
 
+// Helper to check if this is an Electron/Chromium process
+bool IsElectronProcess() {
+    // Check for Electron-specific modules and files
+    HMODULE electronModules[] = {
+        GetModuleHandleW(L"electron.exe"),
+        GetModuleHandleW(L"chrome.dll"),
+        GetModuleHandleW(L"chrome_elf.dll"),
+        GetModuleHandleW(L"node.dll")
+    };
+    
+    for (HMODULE mod : electronModules) {
+        if (mod) {
+            LOG_DEBUG(L"Electron", L"Electron/Chromium process detected");
+            return true;
+        }
+    }
+    
+    // Check for VS Code specific indicators
+    if (GetFileAttributesW(L"resources\\app\\package.json") != INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesW(L"resources.pak") != INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesW(L"chrome_100_percent.pak") != INVALID_FILE_ATTRIBUTES) {
+        LOG_DEBUG(L"Electron", L"VS Code/Electron application detected via resource files");
+        return true;
+    }
+    
+    return false;
+}
+
+// Enhanced function to try BoringSSL/Electron specific exports
+void TryElectronSslFunctions() {
+    LOG_INFO(L"SSL", L"Attempting Electron/BoringSSL specific function discovery");
+    
+    // Electron/Chromium specific modules (prioritized order)
+    const wchar_t* electronSslModules[] = {
+        L"chrome.dll",         // Primary Chromium/BoringSSL location
+        L"chrome_child.dll",   // Child process SSL functions
+        L"node.dll",          // Node.js/BoringSSL in Electron
+        L"electron.exe",      // Sometimes contains SSL symbols
+        L"nw.dll",           // NW.js applications
+        L"ffmpeg.dll",       // May contain SSL exports in some Electron apps
+        L"libnode.dll",      // Alternative Node.js naming
+        L"v8.dll"            // V8 engine may have SSL exports
+    };
+    
+    // BoringSSL may use different export names
+    const char* boringSSLExports[] = {
+        "SSL_new",
+        "SSL_CTX_set_keylog_callback", 
+        "SSL_get_servername",
+        // BoringSSL specific variants
+        "SSL_get_servername_ex",
+        "SSL_CTX_set_keylog_callback_ex",
+        // Try mangled C++ names that might exist
+        "?SSL_new@@YAPAUssl_st@@PAUssl_ctx_st@@@Z",
+        "?SSL_CTX_set_keylog_callback@@YAXPAUssl_ctx_st@@P6AXPBUssl_st@@PEBD@Z@Z"
+    };
+    
+    for (const wchar_t* moduleName : electronSslModules) {
+        HMODULE hMod = GetModuleHandleW(moduleName);
+        if (hMod) {
+            LOG_INFO_F(L"SSL", L"Checking Electron module for SSL exports: %s", moduleName);
+            EtwTraceMessage((std::wstring(L"Checking Electron module: ") + moduleName).c_str());
+            
+            wchar_t modulePath[MAX_PATH];
+            GetModuleFileNameW(hMod, modulePath, MAX_PATH);
+            LOG_DEBUG_F(L"SSL", L"Module path: %s", modulePath);
+            
+            // Try all possible export names
+            for (const char* exportName : boringSSLExports) {
+                void* func = GetProcAddress(hMod, exportName);
+                if (func) {
+                    LOG_INFO_F(L"SSL", L"Found %S in %s", exportName, moduleName);
+                    
+                    // Map to our function pointers
+                    if (strstr(exportName, "SSL_new") && !Real_SSL_new) {
+                        Real_SSL_new = (SSL_new_t)func;
+                    }
+                    else if (strstr(exportName, "SSL_CTX_set_keylog_callback") && !Real_SSL_CTX_set_keylog_callback) {
+                        Real_SSL_CTX_set_keylog_callback = (SSL_CTX_set_keylog_callback_t)func;
+                    }
+                    else if (strstr(exportName, "SSL_get_servername") && !Real_SSL_get_servername) {
+                        Real_SSL_get_servername = (SSL_get_servername_t)func;
+                    }
+                }
+            }
+            
+            // Early exit if we found essential functions
+            if (Real_SSL_new && Real_SSL_CTX_set_keylog_callback) {
+                LOG_INFO_F(L"SSL", L"Found essential BoringSSL functions in %s", moduleName);
+                return;
+            }
+        } else {
+            LOG_TRACE_F(L"SSL", L"Electron module %s not loaded", moduleName);
+        }
+    }
+    
+    if (!Real_SSL_new || !Real_SSL_CTX_set_keylog_callback) {
+        LOG_WARN(L"SSL", L"Could not find essential BoringSSL functions via exports");
+    }
+}
+
 // --- Hook Installation ---
 // Helper function to attempt to get SSL function addresses from common module names
 void TryGetSslFunctionsFromExports() {
     LOG_INFO(L"SSL", L"Attempting to find SSL functions from module exports");
     
+    // Check if this is an Electron process and use specialized detection
+    if (IsElectronProcess()) {
+        LOG_INFO(L"SSL", L"Detected Electron/Chromium process - using specialized BoringSSL detection");
+        TryElectronSslFunctions();
+        // If Electron-specific detection worked, return early
+        if (Real_SSL_new && Real_SSL_CTX_set_keylog_callback) {
+            return;
+        }
+        LOG_WARN(L"SSL", L"Electron-specific detection failed, falling back to standard detection");
+    }
+    
+    // Standard SSL module detection (for non-Electron or fallback)
     const wchar_t* commonSslModuleNames[] = {
         L"node.dll",           // For VSCode/Electron's bundled Node.js/BoringSSL
         L"chrome.dll",        // Chromium core library (Electron)
@@ -723,9 +836,125 @@ HMODULE WINAPI Mine_LoadLibraryW(LPCWSTR lpLibFileName) {
     return hMod;
 }
 
+// Enhanced Electron/VS Code process diagnostics
+void DiagnoseElectronEnvironment() {
+    LOG_INFO(L"Electron", L"=== Electron Process Diagnostics ===");
+    
+    std::wstring processName = GetProcessName(GetCurrentProcessId());
+    LOG_INFO_F(L"Electron", L"Process: %s (PID: %d)", processName.c_str(), GetCurrentProcessId());
+    
+    // Check for Electron-specific modules
+    struct ModuleInfo {
+        const wchar_t* name;
+        const wchar_t* description;
+    };
+    
+    ModuleInfo electronModules[] = {
+        {L"chrome.dll", L"Chromium core library (BoringSSL)"},
+        {L"chrome_elf.dll", L"Chromium ELF helper"},
+        {L"chrome_child.dll", L"Chromium child process"},
+        {L"node.dll", L"Node.js runtime"},
+        {L"electron.exe", L"Electron framework"},
+        {L"v8.dll", L"V8 JavaScript engine"},
+        {L"ffmpeg.dll", L"Media processing"},
+        {L"libnode.dll", L"Alternative Node.js naming"}
+    };
+    
+    bool electronDetected = false;
+    for (const auto& module : electronModules) {
+        HMODULE hMod = GetModuleHandleW(module.name);
+        if (hMod) {
+            wchar_t modulePath[MAX_PATH];
+            GetModuleFileNameW(hMod, modulePath, MAX_PATH);
+            LOG_INFO_F(L"Electron", L"✓ %s: %s", module.description, modulePath);
+            electronDetected = true;
+        } else {
+            LOG_TRACE_F(L"Electron", L"✗ %s not loaded", module.description);
+        }
+    }
+    
+    if (electronDetected) {
+        LOG_INFO(L"Electron", L"Electron/Chromium process confirmed");
+        EtwTraceMessage(L"Electron/Chromium process confirmed via module detection");
+    } else {
+        LOG_INFO(L"Electron", L"Standard Windows process (non-Electron)");
+    }
+    
+    // Check for VS Code specific resources and files
+    std::vector<std::wstring> vscodeIndicators = {
+        L"resources\\app\\package.json",
+        L"resources.pak", 
+        L"chrome_100_percent.pak",
+        L"resources\\app\\out\\main.js",
+        L"resources\\app\\extensions"
+    };
+    
+    bool vscodeDetected = false;
+    for (const auto& indicator : vscodeIndicators) {
+        if (GetFileAttributesW(indicator.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            LOG_INFO_F(L"Electron", L"✓ VS Code indicator found: %s", indicator.c_str());
+            vscodeDetected = true;
+        }
+    }
+    
+    if (vscodeDetected) {
+        LOG_INFO(L"Electron", L"VS Code application confirmed");
+        EtwTraceMessage(L"VS Code application confirmed via resource file detection");
+    }
+    
+    // Check command line for process type
+    wchar_t* cmdLine = GetCommandLineW();
+    if (cmdLine) {
+        std::wstring cmdLineStr(cmdLine);
+        LOG_DEBUG_F(L"Electron", L"Command line: %s", cmdLineStr.c_str());
+        
+        if (cmdLineStr.find(L"--type=renderer") != std::wstring::npos) {
+            LOG_INFO(L"Electron", L"Process type: Renderer (UI process)");
+            EtwTraceMessage(L"Detected Electron renderer process");
+        }
+        else if (cmdLineStr.find(L"--type=extensionHost") != std::wstring::npos || 
+                 cmdLineStr.find(L"--type=extension-host") != std::wstring::npos) {
+            LOG_INFO(L"Electron", L"Process type: Extension Host (extensions run here)");
+            EtwTraceMessage(L"Detected VS Code extension host process");
+        }
+        else if (cmdLineStr.find(L"--type=") != std::wstring::npos) {
+            LOG_INFO(L"Electron", L"Process type: Worker/Utility process");
+        }
+        else if (electronDetected || vscodeDetected) {
+            LOG_INFO(L"Electron", L"Process type: Main process");
+            EtwTraceMessage(L"Detected Electron main process");
+        }
+    }
+    
+    // Architecture and compatibility info
+    SYSTEM_INFO sysInfo;
+    GetNativeSystemInfo(&sysInfo);
+    std::wstring archStr;
+    switch (sysInfo.wProcessorArchitecture) {
+        case PROCESSOR_ARCHITECTURE_AMD64: archStr = L"x64"; break;
+        case PROCESSOR_ARCHITECTURE_ARM64: archStr = L"ARM64"; break;
+        case PROCESSOR_ARCHITECTURE_INTEL: archStr = L"x86"; break;
+        default: archStr = L"Unknown"; break;
+    }
+    LOG_INFO_F(L"Electron", L"System architecture: %s", archStr.c_str());
+    
+    // Check if running under emulation
+    BOOL isWow64 = FALSE;
+    IsWow64Process(GetCurrentProcess(), &isWow64);
+    if (isWow64) {
+        LOG_INFO(L"Electron", L"Process running under WoW64 emulation");
+        EtwTraceMessage(L"Process running under WoW64 emulation - may affect hook compatibility");
+    }
+    
+    LOG_INFO(L"Electron", L"=== End Electron Diagnostics ===");
+}
+
 void InstallHooks() {
     LOG_INFO(L"Hooks", L"Beginning hook installation");
     LOG_INFO_F(L"Hooks", L"Process: %s (PID: %d)", GetProcessName(GetCurrentProcessId()).c_str(), GetCurrentProcessId());
+    
+    // Run Electron diagnostics first
+    DiagnoseElectronEnvironment();
     
     EtwRegister();
     LOG_DEBUG(L"Hooks", L"ETW registered");
